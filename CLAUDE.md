@@ -21,7 +21,7 @@ yesz/
     YesZ.Rendering/              3D render pipeline, Graphics3D, materials, lighting
     YesZ.Desktop/                Desktop launcher (wraps NoZ SDLPlatform + WebGPU)
   samples/
-    HelloCube/                   Minimal sample — window + UI + (Phase 2: spinning cube)
+    HelloCube/                   Minimal sample — window + UI + (Phase 1G: spinning cube)
   tests/
     YesZ.Core.Tests/             Transform3D, Camera3D tests (xUnit)
     YesZ.Rendering.Tests/        Rendering pipeline tests (xUnit)
@@ -35,6 +35,7 @@ yesz/
 | [.claude/architecture.md](.claude/architecture.md) | System architecture, layer diagram, NoZ integration |
 | [.claude/maintenance.md](.claude/maintenance.md) | Upstream merge procedures, fork change log |
 | [.claude/noz-internals.md](.claude/noz-internals.md) | NoZ engine architecture reference |
+| [.claude/phase1-plan.md](.claude/phase1-plan.md) | Phase 1 sub-phases, fork changes, design decisions |
 
 ## Conventions
 
