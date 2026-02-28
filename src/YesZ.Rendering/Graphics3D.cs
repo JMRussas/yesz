@@ -1,12 +1,22 @@
 //  YesZ - 3D Graphics
 //
 //  Static entry point for 3D rendering.
-//  Begin() sets the 3D perspective projection via the globals system, clears per-frame
-//  light state, and uploads the light uniform buffer.
+//  Begin() saves the 2D projection, stores the camera, and clears per-frame light state.
 //  DrawMesh() computes per-object transforms and issues draw commands through NoZ's
-//  batch system. Lit materials receive VP in globals + model/normal in material UBO;
-//  unlit/textured materials receive full MVP in globals.
-//  End() restores 2D state for NoZ UI overlay.
+//  batch system. End() restores 2D state for NoZ UI overlay.
+//
+//  Two rendering paths:
+//    Unlit/textured — MVP (model × view × projection) stored in the globals "projection"
+//      field. Each DrawMesh creates a unique globals snapshot → unique batch state →
+//      separate draw call (max ~64 unique transforms/frame).
+//    Lit — VP in globals, model + normal matrix in LitMaterialUniforms (@binding 1),
+//      light data in LightUniforms (@binding 4). Per-batch uniform snapshots ensure
+//      each draw gets the correct material/light data during deferred execution.
+//
+//  Matrix convention: SetPassProjection pre-transposes to cancel NoZ's UploadGlobals
+//  transpose. SetUniform uploads raw bytes — C# row-major naturally maps to WGSL
+//  column-major (row-vector/column-vector flip cancels storage order flip). No
+//  transpose needed for matrices passed through SetUniform.
 //
 //  Depends on: YesZ.Core (Camera3D, Mesh3D, MeshVertex3D, LightEnvironment, DirectionalLight, PointLight, AmbientLight),
 //              YesZ.Rendering (Material3D, MaterialUniforms, LitMaterialUniforms, LightUniforms),
@@ -31,6 +41,7 @@ public static class Graphics3D
     private static nuint _defaultWhiteTexture;
     private static Material3D? _currentMaterial;
     private static readonly LightEnvironment _lights = new();
+    private static bool _lightsUploadedThisFrame;
 
     /// <summary>
     /// Initialize the 3D rendering system. Must be called after Graphics is initialized
@@ -150,8 +161,8 @@ public static class Graphics3D
 
     /// <summary>
     /// Begin 3D rendering pass. Saves the current 2D projection, stores
-    /// the camera for per-draw MVP computation, clears per-frame light state,
-    /// and uploads the light uniform buffer.
+    /// the camera for per-draw MVP computation, and clears per-frame light state.
+    /// Light UBO upload is deferred to the first lit draw call.
     /// </summary>
     public static void Begin(Camera3D camera)
     {
@@ -162,9 +173,7 @@ public static class Graphics3D
         _camera = camera;
         _viewProjection = camera.ViewProjectionMatrix;
         _lights.ClearPointLights();
-
-        // Upload light uniform buffer — light data is the same for all draws this frame
-        UploadLightUniforms();
+        _lightsUploadedThisFrame = false;
     }
 
     /// <summary>
@@ -220,18 +229,27 @@ public static class Graphics3D
 
     private static void DrawMeshLit(Mesh3D mesh, Matrix4x4 worldMatrix)
     {
+        // Upload light UBO once per frame, on first lit draw.
+        // Deferred from Begin() so user can set lights between Begin() and DrawMesh().
+        if (!_lightsUploadedThisFrame)
+        {
+            UploadLightUniforms();
+            _lightsUploadedThisFrame = true;
+        }
+
         // Lit path: globals get VP (view × projection), material gets model + normal matrix.
         // Pre-transpose VP to cancel NoZ's UploadGlobals transpose.
         Graphics.SetPassProjection(Matrix4x4.Transpose(_viewProjection));
 
-        // Model and normal matrices go through SetUniform (no auto-transpose),
-        // so we must transpose them manually for WGSL's column-major layout.
+        // SetUniform uploads raw bytes (no auto-transpose like UploadGlobals).
+        // C# row-major bytes naturally map to WGSL column-major layout because the
+        // row-vector/column-vector convention flip cancels the storage order flip.
         var normalMatrix = ComputeNormalMatrix(in worldMatrix);
 
         var uniforms = new LitMaterialUniforms
         {
-            Model = Matrix4x4.Transpose(worldMatrix),
-            NormalMatrix = Matrix4x4.Transpose(normalMatrix),
+            Model = worldMatrix,
+            NormalMatrix = normalMatrix,
             BaseColorFactor = _currentMaterial!.BaseColorFactor,
             Metallic = _currentMaterial.Metallic,
             Roughness = _currentMaterial.Roughness,
@@ -280,17 +298,9 @@ public static class Graphics3D
 
         var uniforms = new LightUniforms
         {
-            AmbientColor = new Vector4(
-                ambient.Color.X * ambient.Intensity,
-                ambient.Color.Y * ambient.Intensity,
-                ambient.Color.Z * ambient.Intensity,
-                0),
+            AmbientColor = new Vector4(ambient.EffectiveColor, 0),
             DirectionalDir = new Vector4(dir.Direction, 0),
-            DirectionalColor = new Vector4(
-                dir.Color.X * dir.Intensity,
-                dir.Color.Y * dir.Intensity,
-                dir.Color.Z * dir.Intensity,
-                0),
+            DirectionalColor = new Vector4(dir.EffectiveColor, 0),
             CameraPosition = new Vector4(_camera.Position, 0),
         };
         Graphics.SetUniform("lights", in uniforms);
