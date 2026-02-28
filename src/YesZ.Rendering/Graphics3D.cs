@@ -1,25 +1,15 @@
 //  YesZ - 3D Graphics
 //
 //  Static entry point for 3D rendering.
-//  Begin() sets the 3D perspective projection via the globals system and clears per-frame light state.
-//  DrawMesh() computes per-object MVP and issues draw commands through NoZ's batch system.
+//  Begin() sets the 3D perspective projection via the globals system, clears per-frame
+//  light state, and uploads the light uniform buffer.
+//  DrawMesh() computes per-object transforms and issues draw commands through NoZ's
+//  batch system. Lit materials receive VP in globals + model/normal in material UBO;
+//  unlit/textured materials receive full MVP in globals.
 //  End() restores 2D state for NoZ UI overlay.
 //
-//  Design: MVP (model × view × projection) is stored in the globals system
-//  as the "projection" matrix. This integrates with NoZ's batch system without
-//  per-draw uniform buffer tracking. Each DrawMesh creates a unique globals
-//  snapshot (different MVP → different batch state → separate draw call).
-//
-//  Materials: SetMaterial() binds a Material3D's shader, texture, and uniform
-//  data. Per-batch uniform snapshots in NoZ's Graphics ensure each batch gets
-//  the correct material uniform values during deferred execution.
-//
-//  Lighting: SetDirectionalLight(), SetAmbientLight(), AddPointLight() configure
-//  the LightEnvironment for the current frame. Point lights are cleared each frame
-//  in Begin(). Light data is uploaded to the GPU in Phase 3b.
-//
 //  Depends on: YesZ.Core (Camera3D, Mesh3D, MeshVertex3D, LightEnvironment, DirectionalLight, PointLight, AmbientLight),
-//              YesZ.Rendering (Material3D, MaterialUniforms),
+//              YesZ.Rendering (Material3D, MaterialUniforms, LitMaterialUniforms, LightUniforms),
 //              NoZ (Graphics, Shader, ShaderFlags, ShaderBinding, ShaderBindingType, TextureFormat, TextureFilter)
 //  Used by:    Game code, samples
 
@@ -33,6 +23,7 @@ public static class Graphics3D
 {
     private static Shader? _unlitShader;
     private static Shader? _texturedShader;
+    private static Shader? _litShader;
     private static Camera3D? _camera;
     private static Matrix4x4 _savedProjection;
     private static Matrix4x4 _viewProjection;
@@ -74,6 +65,20 @@ public static class Graphics3D
                 new() { Binding = 3, Type = ShaderBindingType.Sampler, Name = "base_color_sampler" },
             });
 
+        // Lit shader (Blinn-Phong diffuse + specular + ambient)
+        _litShader = CreateShaderFromEmbedded(
+            "YesZ.Rendering.Shaders.lit3d.wgsl",
+            "lit3d",
+            flags,
+            new List<ShaderBinding>
+            {
+                new() { Binding = 0, Type = ShaderBindingType.UniformBuffer, Name = "globals" },
+                new() { Binding = 1, Type = ShaderBindingType.UniformBuffer, Name = "material" },
+                new() { Binding = 2, Type = ShaderBindingType.Texture2D, Name = "base_color_texture" },
+                new() { Binding = 3, Type = ShaderBindingType.Sampler, Name = "base_color_sampler" },
+                new() { Binding = 4, Type = ShaderBindingType.UniformBuffer, Name = "lights" },
+            });
+
         // Default 1×1 white texture — untextured materials sample this (identity multiply)
         var white = new byte[] { 255, 255, 255, 255 };
         _defaultWhiteTexture = Graphics.Driver.CreateTexture(1, 1, white, TextureFormat.RGBA8, TextureFilter.Point, "DefaultWhite");
@@ -82,7 +87,7 @@ public static class Graphics3D
     }
 
     /// <summary>
-    /// Create a new Material3D using the textured shader and default white texture.
+    /// Create a new Material3D using the textured (unlit) shader and default white texture.
     /// </summary>
     public static Material3D CreateMaterial()
     {
@@ -93,24 +98,24 @@ public static class Graphics3D
     }
 
     /// <summary>
+    /// Create a new Material3D using the lit shader and default white texture.
+    /// Lit materials receive directional + ambient lighting via the light UBO.
+    /// </summary>
+    public static Material3D CreateLitMaterial()
+    {
+        if (!_initialized)
+            Initialize();
+
+        return new Material3D(_litShader!.Handle, _defaultWhiteTexture);
+    }
+
+    /// <summary>
     /// Set the active material for subsequent DrawMesh calls.
-    /// Binds the material's shader, texture, and uploads uniform data.
     /// Pass null to revert to the unlit (vertex-color-only) shader.
     /// </summary>
     public static void SetMaterial(Material3D? material)
     {
         _currentMaterial = material;
-
-        if (material == null) return;
-
-        // Upload material uniform data
-        var uniforms = new MaterialUniforms
-        {
-            BaseColorFactor = material.BaseColorFactor,
-            Metallic = material.Metallic,
-            Roughness = material.Roughness,
-        };
-        Graphics.SetUniform("material", in uniforms);
     }
 
     /// <summary>
@@ -145,7 +150,8 @@ public static class Graphics3D
 
     /// <summary>
     /// Begin 3D rendering pass. Saves the current 2D projection, stores
-    /// the camera for per-draw MVP computation, and clears per-frame light state.
+    /// the camera for per-draw MVP computation, clears per-frame light state,
+    /// and uploads the light uniform buffer.
     /// </summary>
     public static void Begin(Camera3D camera)
     {
@@ -156,43 +162,31 @@ public static class Graphics3D
         _camera = camera;
         _viewProjection = camera.ViewProjectionMatrix;
         _lights.ClearPointLights();
+
+        // Upload light uniform buffer — light data is the same for all draws this frame
+        UploadLightUniforms();
     }
 
     /// <summary>
     /// Draw a 3D mesh with the given world transform.
-    /// Computes MVP and issues a draw command through NoZ's batch system.
-    /// Uses the current material's shader if set, otherwise falls back to unlit.
+    /// For lit materials: uploads VP to globals, model + normal matrix to material UBO.
+    /// For unlit/textured: uploads full MVP to globals, material params to material UBO.
     /// </summary>
     public static void DrawMesh(Mesh3D mesh, Matrix4x4 worldMatrix)
     {
         if (_camera == null) return;
 
-        // MVP = model × view × projection (row-major multiplication order)
-        var mvp = worldMatrix * _viewProjection;
+        bool isLit = _currentMaterial != null && _litShader != null
+                     && _currentMaterial.ShaderHandle == _litShader.Handle;
 
-        // NoZ's UploadGlobals transposes the projection before uploading to the GPU.
-        // NoZ's 2D SetCamera constructs matrices pre-transposed for this cycle, but
-        // System.Numerics helpers (CreateLookAt, CreatePerspectiveFieldOfView) produce
-        // row-vector convention matrices. Pre-transposing here cancels NoZ's transpose,
-        // so the GPU receives the correct bytes for WGSL's column-major `M * v`.
-        Graphics.SetPassProjection(Matrix4x4.Transpose(mvp));
-
-        // Use material shader if set, otherwise fall back to unlit
-        var shader = _currentMaterial != null ? _texturedShader : _unlitShader;
-        if (shader == null) return;
-
-        Graphics.SetShader(shader);
-
-        // Bind material texture if using textured shader
-        if (_currentMaterial != null)
+        if (isLit)
         {
-            Graphics.SetTexture(_currentMaterial.BaseColorTexture, 0, TextureFilter.Linear);
+            DrawMeshLit(mesh, worldMatrix);
         }
-
-        Graphics.SetMesh(mesh.RenderMesh);
-
-        // Issue draw command
-        Graphics.DrawElements(mesh.IndexCount, 0);
+        else
+        {
+            DrawMeshUnlit(mesh, worldMatrix);
+        }
     }
 
     /// <summary>
@@ -205,6 +199,101 @@ public static class Graphics3D
         Graphics.SetPassProjection(_savedProjection);
         _camera = null;
         _currentMaterial = null;
+    }
+
+    /// <summary>
+    /// Compute the normal matrix for a given model matrix.
+    /// Returns the transpose of the inverse of the upper 3×3, stored as a full mat4x4
+    /// for GPU alignment. Falls back to the model matrix if inversion fails.
+    /// </summary>
+    internal static Matrix4x4 ComputeNormalMatrix(in Matrix4x4 model)
+    {
+        if (Matrix4x4.Invert(model, out var inverted))
+        {
+            // Transpose of the inverse — this is the standard normal matrix
+            return Matrix4x4.Transpose(inverted);
+        }
+
+        // Singular matrix fallback: use model as-is (correct for rotation + uniform scale)
+        return model;
+    }
+
+    private static void DrawMeshLit(Mesh3D mesh, Matrix4x4 worldMatrix)
+    {
+        // Lit path: globals get VP (view × projection), material gets model + normal matrix.
+        // Pre-transpose VP to cancel NoZ's UploadGlobals transpose.
+        Graphics.SetPassProjection(Matrix4x4.Transpose(_viewProjection));
+
+        // Model and normal matrices go through SetUniform (no auto-transpose),
+        // so we must transpose them manually for WGSL's column-major layout.
+        var normalMatrix = ComputeNormalMatrix(in worldMatrix);
+
+        var uniforms = new LitMaterialUniforms
+        {
+            Model = Matrix4x4.Transpose(worldMatrix),
+            NormalMatrix = Matrix4x4.Transpose(normalMatrix),
+            BaseColorFactor = _currentMaterial!.BaseColorFactor,
+            Metallic = _currentMaterial.Metallic,
+            Roughness = _currentMaterial.Roughness,
+        };
+        Graphics.SetUniform("material", in uniforms);
+
+        Graphics.SetShader(_litShader!);
+        Graphics.SetTexture(_currentMaterial.BaseColorTexture, 0, TextureFilter.Linear);
+        Graphics.SetMesh(mesh.RenderMesh);
+        Graphics.DrawElements(mesh.IndexCount, 0);
+    }
+
+    private static void DrawMeshUnlit(Mesh3D mesh, Matrix4x4 worldMatrix)
+    {
+        // Unlit/textured path: globals get full MVP (model × view × projection).
+        var mvp = worldMatrix * _viewProjection;
+        Graphics.SetPassProjection(Matrix4x4.Transpose(mvp));
+
+        var shader = _currentMaterial != null ? _texturedShader : _unlitShader;
+        if (shader == null) return;
+
+        Graphics.SetShader(shader);
+
+        if (_currentMaterial != null)
+        {
+            var uniforms = new MaterialUniforms
+            {
+                BaseColorFactor = _currentMaterial.BaseColorFactor,
+                Metallic = _currentMaterial.Metallic,
+                Roughness = _currentMaterial.Roughness,
+            };
+            Graphics.SetUniform("material", in uniforms);
+            Graphics.SetTexture(_currentMaterial.BaseColorTexture, 0, TextureFilter.Linear);
+        }
+
+        Graphics.SetMesh(mesh.RenderMesh);
+        Graphics.DrawElements(mesh.IndexCount, 0);
+    }
+
+    private static void UploadLightUniforms()
+    {
+        if (_camera == null) return;
+
+        var ambient = _lights.Ambient;
+        var dir = _lights.Directional;
+
+        var uniforms = new LightUniforms
+        {
+            AmbientColor = new Vector4(
+                ambient.Color.X * ambient.Intensity,
+                ambient.Color.Y * ambient.Intensity,
+                ambient.Color.Z * ambient.Intensity,
+                0),
+            DirectionalDir = new Vector4(dir.Direction, 0),
+            DirectionalColor = new Vector4(
+                dir.Color.X * dir.Intensity,
+                dir.Color.Y * dir.Intensity,
+                dir.Color.Z * dir.Intensity,
+                0),
+            CameraPosition = new Vector4(_camera.Position, 0),
+        };
+        Graphics.SetUniform("lights", in uniforms);
     }
 
     private static Shader CreateShaderFromEmbedded(

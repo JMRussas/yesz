@@ -1,9 +1,9 @@
 //  YesZ - HelloCube Application
 //
-//  Renders a spinning textured cube with 2D UI overlay.
-//  Demonstrates Graphics3D material system with NoZ 2D coexistence.
+//  Renders a spinning lit cube with directional and ambient lighting.
+//  Demonstrates Graphics3D lit material system with Blinn-Phong shading.
 //
-//  Depends on: YesZ.Core (Camera3D, Transform3D, Mesh3D, Mesh3DBuilder),
+//  Depends on: YesZ.Core (Camera3D, Transform3D, Mesh3D, Mesh3DBuilder, DirectionalLight, AmbientLight),
 //              YesZ.Rendering (Graphics3D, Material3D, TextureLoader), NoZ (IApplication, Graphics, UI, Color, Time)
 //  Used by:    Program.cs
 
@@ -78,8 +78,9 @@ public class HelloCubeApp : IApplication
             new Color(0.4f, 0.35f, 0.25f),
             cellSize: 32);
 
-        _material = Graphics3D.CreateMaterial();
+        _material = Graphics3D.CreateLitMaterial();
         _material.BaseColorTexture = texture;
+        _material.Roughness = 0.6f;
     }
 
     public void Update()
@@ -99,6 +100,20 @@ public class HelloCubeApp : IApplication
 
         // 3D rendering pass
         Graphics3D.Begin(_camera);
+
+        // Lighting — directional from upper-left-front, soft ambient fill
+        Graphics3D.SetDirectionalLight(new DirectionalLight
+        {
+            Direction = Vector3.Normalize(new Vector3(-0.5f, -1.0f, -0.5f)),
+            Color = Vector3.One,
+            Intensity = 1.5f,
+        });
+        Graphics3D.SetAmbientLight(new AmbientLight
+        {
+            Color = Vector3.One,
+            Intensity = 0.15f,
+        });
+
         Graphics3D.SetMaterial(_material);
         Graphics3D.DrawMesh(_cube, _cubeTransform.LocalMatrix);
         Graphics3D.End();
@@ -111,7 +126,7 @@ public class HelloCubeApp : IApplication
             using (UI.BeginColumn(BoxStyle))
             {
                 UI.Label("YesZ", TitleStyle);
-                UI.Label("Phase 2 - Materials & Texturing", SubtitleStyle);
+                UI.Label("Phase 3b - Lit Shading", SubtitleStyle);
             }
         }
     }
