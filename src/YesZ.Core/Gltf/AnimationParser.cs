@@ -90,21 +90,36 @@ public static class AnimationParser
     private static AnimationChannel3D ParseTranslationChannel(
         int jointIndex, InterpolationMode interp, float[] times, AccessorReader reader, int outputAccessor)
     {
-        var values = reader.Read<Vector3>(outputAccessor);
+        var raw = reader.Read<Vector3>(outputAccessor);
+        var values = interp == InterpolationMode.CubicSpline ? StripCubicSpline(raw, times.Length) : raw;
         return new AnimationChannel3D(jointIndex, AnimationPath.Translation, interp, times, values, null, null);
     }
 
     private static AnimationChannel3D ParseRotationChannel(
         int jointIndex, InterpolationMode interp, float[] times, AccessorReader reader, int outputAccessor)
     {
-        var values = reader.Read<Quaternion>(outputAccessor);
+        var raw = reader.Read<Quaternion>(outputAccessor);
+        var values = interp == InterpolationMode.CubicSpline ? StripCubicSpline(raw, times.Length) : raw;
         return new AnimationChannel3D(jointIndex, AnimationPath.Rotation, interp, times, null, values, null);
     }
 
     private static AnimationChannel3D ParseScaleChannel(
         int jointIndex, InterpolationMode interp, float[] times, AccessorReader reader, int outputAccessor)
     {
-        var values = reader.Read<Vector3>(outputAccessor);
+        var raw = reader.Read<Vector3>(outputAccessor);
+        var values = interp == InterpolationMode.CubicSpline ? StripCubicSpline(raw, times.Length) : raw;
         return new AnimationChannel3D(jointIndex, AnimationPath.Scale, interp, times, null, null, values);
+    }
+
+    /// <summary>
+    /// CubicSpline outputs have 3 values per keyframe: [in-tangent, value, out-tangent].
+    /// Strip to just the value elements (every 3rd starting at index 1).
+    /// </summary>
+    private static T[] StripCubicSpline<T>(T[] raw, int keyframeCount)
+    {
+        var values = new T[keyframeCount];
+        for (int i = 0; i < keyframeCount; i++)
+            values[i] = raw[i * 3 + 1];
+        return values;
     }
 }
