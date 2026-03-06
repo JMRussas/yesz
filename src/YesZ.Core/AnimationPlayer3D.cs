@@ -4,7 +4,7 @@
 //  and samples all channels to produce per-joint local transforms.
 //
 //  Depends on: YesZ (AnimationClip3D, AnimationChannel3D, AnimationSampler,
-//              Skeleton3D, JointMatrixComputer), System.Numerics
+//              Skeleton3D), System.Numerics
 //  Used by:    Game code, AnimationPlayerTests
 
 using System;
@@ -131,7 +131,8 @@ public class AnimationPlayer3D
             // If only some components are animated, decompose bind pose for the rest
             if (animated[j] != 7) // Not all three animated
             {
-                Matrix4x4.Decompose(localPoses[j], out var bScale, out var bRot, out var bTrans);
+                if (!Matrix4x4.Decompose(localPoses[j], out var bScale, out var bRot, out var bTrans))
+                    continue; // Singular bind pose — skip, keep defaults
                 if ((animated[j] & 1) == 0) translations[j] = bTrans;
                 if ((animated[j] & 2) == 0) rotations[j] = bRot;
                 if ((animated[j] & 4) == 0) scales[j] = bScale;

@@ -1,7 +1,7 @@
 //  YesZ - Animation Sampler
 //
 //  Samples animation channels at arbitrary time values using binary search
-//  for keyframe brackets and per-mode interpolation (LINEAR, STEP, CUBICSPLINE).
+//  for keyframe brackets and per-mode interpolation (LINEAR, STEP).
 //
 //  Depends on: YesZ (AnimationChannel3D, AnimationPath, InterpolationMode),
 //              System.Numerics
