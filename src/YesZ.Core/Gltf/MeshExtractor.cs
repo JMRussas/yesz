@@ -18,6 +18,7 @@
 
 using System;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using NoZ;
 
 namespace YesZ.Gltf;
@@ -35,7 +36,7 @@ public readonly record struct ExtractedSkinnedMesh(SkinnedMeshVertex3D[] Vertice
 /// <summary>
 /// 4× ushort for reading JOINTS_0 with UNSIGNED_SHORT component type.
 /// </summary>
-[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential)]
 internal struct UShort4
 {
     public ushort X, Y, Z, W;
@@ -133,7 +134,7 @@ public static class MeshExtractor
         JointIndices4[] joints;
         if (primitive.Attributes!.TryGetValue("JOINTS_0", out int jointsIdx))
         {
-            joints = ReadJointIndices(reader, doc, jointsIdx, vertexCount);
+            joints = ReadJointIndices(reader, doc, jointsIdx);
         }
         else
         {
@@ -179,7 +180,7 @@ public static class MeshExtractor
     /// Handles UNSIGNED_BYTE (5121) and UNSIGNED_SHORT (5123) component types.
     /// </summary>
     internal static JointIndices4[] ReadJointIndices(
-        AccessorReader reader, GltfDocument doc, int accessorIndex, int expectedCount)
+        AccessorReader reader, GltfDocument doc, int accessorIndex)
     {
         var accessor = doc.Accessors![accessorIndex];
         return accessor.ComponentType switch
