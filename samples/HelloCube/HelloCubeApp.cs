@@ -141,8 +141,8 @@ public class HelloCubeApp : IApplication
         var staticWorld = _modelTransform.LocalMatrix
             * Matrix4x4.CreateTranslation(-2f, 0, 0);
 
-        // Shadow pass — exercises depth-only pass infrastructure
-        // (no actual rendering into depth texture until Phase 6b adds batch integration)
+        // Enable shadow rendering — casters are collected during DrawModel/DrawAnimatedModel,
+        // and the depth pass executes in Graphics3D.End() via direct driver calls.
         Graphics3D.RenderShadowPass();
 
         // Draw static model on the left
@@ -171,7 +171,7 @@ public class HelloCubeApp : IApplication
             using (UI.BeginColumn(BoxStyle))
             {
                 UI.Label("YesZ", TitleStyle);
-                UI.Label("Phase 6a - Shadow Infrastructure", SubtitleStyle);
+                UI.Label("Phase 6b - Shadow Sampling", SubtitleStyle);
             }
         }
     }

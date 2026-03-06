@@ -3,7 +3,8 @@
 //  Static entry point for 3D rendering.
 //  Begin() saves the 2D projection, stores the camera, and clears per-frame light state.
 //  DrawMesh() computes per-object transforms and issues draw commands through NoZ's
-//  batch system. End() restores 2D state for NoZ UI overlay.
+//  batch system. End() executes the shadow pass via direct driver calls, then restores
+//  2D state for NoZ UI overlay.
 //
 //  Two rendering paths:
 //    Unlit/textured — MVP (model × view × projection) stored in the globals "projection"
@@ -12,14 +13,19 @@
 //    Lit — VP in globals, model + normal matrix in LitMaterialUniforms (@binding 1),
 //      light data in LightUniforms (@binding 4). Per-batch uniform snapshots ensure
 //      each draw gets the correct material/light data during deferred execution.
+//    Lit+Shadow — Same as Lit, plus ShadowUniforms (@binding 5) and shadow depth
+//      texture (@binding 6). Shadow pass renders scene to depth-only texture via
+//      direct driver calls (bypassing batch system) before the scene pass.
 //
 //  Matrix convention: SetPassProjection pre-transposes to cancel NoZ's UploadGlobals
 //  transpose. SetUniform uploads raw bytes — C# row-major naturally maps to WGSL
 //  column-major (row-vector/column-vector flip cancels storage order flip). No
 //  transpose needed for matrices passed through SetUniform.
 //
-//  Depends on: YesZ.Core (Camera3D, Mesh3D, MeshVertex3D, LightEnvironment, DirectionalLight, PointLight, AmbientLight),
-//              YesZ.Rendering (Material3D, MaterialUniforms, LitMaterialUniforms, LightUniforms),
+//  Depends on: YesZ.Core (Camera3D, Mesh3D, MeshVertex3D, LightEnvironment, DirectionalLight, PointLight, AmbientLight,
+//              LightSpaceComputer),
+//              YesZ.Rendering (Material3D, MaterialUniforms, LitMaterialUniforms, LightUniforms,
+//              ShadowDepthUniforms, ShadowUniforms, ShadowConfig),
 //              NoZ (Graphics, Shader, ShaderFlags, ShaderBinding, ShaderBindingType, TextureFormat, TextureFilter)
 //  Used by:    Game code, samples
 
@@ -34,6 +40,7 @@ public static class Graphics3D
     private static Shader? _unlitShader;
     private static Shader? _texturedShader;
     private static Shader? _litShader;
+    private static Shader? _litShadowShader;
     private static Shader? _skinnedLitShader;
     private static Shader? _shadowDepthShader;
     private static Camera3D? _camera;
@@ -44,16 +51,24 @@ public static class Graphics3D
     private static Material3D? _currentMaterial;
     private static readonly LightEnvironment _lights = new();
     private static bool _lightsUploadedThisFrame;
+    private static bool _shadowUniformsUploadedThisFrame;
 
     // Shadow mapping state
     private static nuint _shadowDepthTexture;
     private static ShadowConfig _shadowConfig = new();
     private static Matrix4x4 _lightViewProjection;
 
-    /// <summary>
-    /// Initialize the 3D rendering system. Must be called after Graphics is initialized
-    /// (e.g., during LoadAssets).
-    /// </summary>
+    // Shadow caster collection — populated during DrawModel/DrawMesh, consumed in End()
+    private struct ShadowCaster
+    {
+        public nuint MeshHandle;
+        public int IndexCount;
+        public Matrix4x4 WorldMatrix;
+    }
+
+    private static readonly List<ShadowCaster> _shadowCasters = new();
+    private static bool _shadowPassEnabled;
+
     public static void Initialize()
     {
         if (_initialized) return;
@@ -97,6 +112,22 @@ public static class Graphics3D
                 new() { Binding = 4, Type = ShaderBindingType.UniformBuffer, Name = "lights" },
             });
 
+        // Lit + shadow shader (Blinn-Phong + PCF shadow mapping)
+        _litShadowShader = CreateShaderFromEmbedded(
+            "YesZ.Rendering.Shaders.lit_shadow3d.wgsl",
+            "lit_shadow3d",
+            flags,
+            new List<ShaderBinding>
+            {
+                new() { Binding = 0, Type = ShaderBindingType.UniformBuffer, Name = "globals" },
+                new() { Binding = 1, Type = ShaderBindingType.UniformBuffer, Name = "material" },
+                new() { Binding = 2, Type = ShaderBindingType.Texture2D, Name = "base_color_texture" },
+                new() { Binding = 3, Type = ShaderBindingType.Sampler, Name = "base_color_sampler" },
+                new() { Binding = 4, Type = ShaderBindingType.UniformBuffer, Name = "lights" },
+                new() { Binding = 5, Type = ShaderBindingType.UniformBuffer, Name = "shadow" },
+                new() { Binding = 6, Type = ShaderBindingType.DepthTexture2D, Name = "shadow_map" },
+            });
+
         // Skinned lit shader (skeletal animation + Blinn-Phong)
         _skinnedLitShader = CreateSkinnedShaderFromEmbedded(
             "YesZ.Rendering.Shaders.skinned3d.wgsl",
@@ -112,15 +143,14 @@ public static class Graphics3D
                 new() { Binding = 5, Type = ShaderBindingType.UniformBuffer, Name = "joints" },
             });
 
-        // Shadow depth shader (vertex-only, no fragment output)
+        // Shadow depth shader — no globals, light VP embedded in material UBO
         _shadowDepthShader = CreateShaderFromEmbedded(
             "YesZ.Rendering.Shaders.shadow_depth.wgsl",
             "shadow_depth",
             ShaderFlags.Depth | ShaderFlags.DepthLess,
             new List<ShaderBinding>
             {
-                new() { Binding = 0, Type = ShaderBindingType.UniformBuffer, Name = "globals" },
-                new() { Binding = 1, Type = ShaderBindingType.UniformBuffer, Name = "material" },
+                new() { Binding = 0, Type = ShaderBindingType.UniformBuffer, Name = "material" },
             });
 
         // Default 1×1 white texture — untextured materials sample this (identity multiply)
@@ -134,9 +164,6 @@ public static class Graphics3D
         _initialized = true;
     }
 
-    /// <summary>
-    /// Create a new Material3D using the textured (unlit) shader and default white texture.
-    /// </summary>
     public static Material3D CreateMaterial()
     {
         if (!_initialized)
@@ -145,10 +172,6 @@ public static class Graphics3D
         return new Material3D(_texturedShader!.Handle, _defaultWhiteTexture);
     }
 
-    /// <summary>
-    /// Create a new Material3D using the lit shader and default white texture.
-    /// Lit materials receive directional + ambient lighting via the light UBO.
-    /// </summary>
     public static Material3D CreateLitMaterial()
     {
         if (!_initialized)
@@ -157,50 +180,28 @@ public static class Graphics3D
         return new Material3D(_litShader!.Handle, _defaultWhiteTexture);
     }
 
-    /// <summary>
-    /// Set the active material for subsequent DrawMesh calls.
-    /// Pass null to revert to the unlit (vertex-color-only) shader.
-    /// </summary>
     public static void SetMaterial(Material3D? material)
     {
         _currentMaterial = material;
     }
 
-    /// <summary>
-    /// Set the directional light for the current frame.
-    /// </summary>
     public static void SetDirectionalLight(in DirectionalLight light)
     {
         _lights.Directional = light;
     }
 
-    /// <summary>
-    /// Set the ambient light for the current frame.
-    /// </summary>
     public static void SetAmbientLight(in AmbientLight light)
     {
         _lights.Ambient = light;
     }
 
-    /// <summary>
-    /// Add a point light for the current frame.
-    /// Up to <see cref="LightEnvironment.MaxPointLights"/> can be added per frame.
-    /// </summary>
     public static void AddPointLight(in PointLight light)
     {
         _lights.AddPointLight(in light);
     }
 
-    /// <summary>
-    /// Read-only access to the current light environment (for testing and diagnostics).
-    /// </summary>
     public static LightEnvironment Lights => _lights;
 
-    /// <summary>
-    /// Begin 3D rendering pass. Saves the current 2D projection, stores
-    /// the camera for per-draw MVP computation, and clears per-frame light state.
-    /// Light UBO upload is deferred to the first lit draw call.
-    /// </summary>
     public static void Begin(Camera3D camera)
     {
         if (!_initialized)
@@ -211,13 +212,11 @@ public static class Graphics3D
         _viewProjection = camera.ViewProjectionMatrix;
         _lights.ClearPointLights();
         _lightsUploadedThisFrame = false;
+        _shadowUniformsUploadedThisFrame = false;
+        _shadowCasters.Clear();
+        _shadowPassEnabled = false;
     }
 
-    /// <summary>
-    /// Draw a 3D mesh with the given world transform.
-    /// For lit materials: uploads VP to globals, model + normal matrix to material UBO.
-    /// For unlit/textured: uploads full MVP to globals, material params to material UBO.
-    /// </summary>
     public static void DrawMesh(Mesh3D mesh, Matrix4x4 worldMatrix)
     {
         if (_camera == null) return;
@@ -235,10 +234,6 @@ public static class Graphics3D
         }
     }
 
-    /// <summary>
-    /// Draw all meshes in a model with the given root world transform.
-    /// Recursively traverses the node hierarchy, composing transforms.
-    /// </summary>
     public static void DrawModel(Model3D model, Matrix4x4 worldMatrix)
     {
         var savedMaterial = _currentMaterial;
@@ -270,11 +265,6 @@ public static class Graphics3D
             DrawNode(child, world, model);
     }
 
-    /// <summary>
-    /// Draw a skinned mesh with the given joint matrices (from JointMatrixComputer).
-    /// Joint matrices replace the model matrix — the skin matrix handles world placement.
-    /// The current material is used for lighting and texturing.
-    /// </summary>
     public static void DrawSkinnedMesh(SkinnedMesh3D mesh, ReadOnlySpan<Matrix4x4> jointMatrices)
     {
         if (_camera == null || _skinnedLitShader == null) return;
@@ -316,11 +306,6 @@ public static class Graphics3D
         Graphics.DrawElements(mesh.IndexCount, 0);
     }
 
-    /// <summary>
-    /// Draw all meshes in a model with skeletal animation.
-    /// Computes joint matrices from the animation player state and renders skinned meshes.
-    /// Non-skinned primitives are rendered with the given world transform.
-    /// </summary>
     public static void DrawAnimatedModel(
         Model3D model, Matrix4x4 worldMatrix, ReadOnlySpan<Matrix4x4> jointMatrices)
     {
@@ -382,7 +367,32 @@ public static class Graphics3D
 
     public static void RenderShadowPass()
     {
-        if (_camera == null || _shadowDepthShader == null || _shadowDepthTexture == 0) return;
+        // Mark that the caller wants shadow rendering this frame.
+        // Actual shadow pass execution is deferred to End() after all shadow casters
+        // have been collected via DrawModel/DrawMesh calls.
+        _shadowPassEnabled = true;
+    }
+
+    public static void End()
+    {
+        // Execute shadow depth pass via direct driver calls (bypasses NoZ batch system).
+        // Must happen before the scene pass so the shadow texture is ready for sampling.
+        if (_shadowPassEnabled)
+            ExecuteShadowPass();
+
+        // Restore 2D projection so subsequent UI draws use the correct matrix
+        Graphics.SetPassProjection(_savedProjection);
+        _camera = null;
+        _currentMaterial = null;
+    }
+
+    private static void ExecuteShadowPass()
+    {
+        if (_camera == null || _shadowDepthShader == null || _shadowDepthTexture == 0)
+            return;
+
+        if (_shadowCasters.Count == 0)
+            return;
 
         // Compute light-space matrices from directional light
         var directional = _lights.Directional;
@@ -390,68 +400,75 @@ public static class Graphics3D
             in directional, _camera, _shadowConfig.ShadowDistance);
         _lightViewProjection = lightView * lightProj;
 
-        // NOTE: NoZ's batch system defers draw commands for later execution during
-        // the scene pass. The depth-only pass opens/closes immediately at the driver
-        // level, so draw commands issued here don't actually execute in this pass —
-        // they queue into the scene pass batch instead. Phase 6b will add immediate-
-        // mode rendering or a separate command buffer to make draws execute within
-        // the depth-only pass. For now, this exercises the pass infrastructure and
-        // computes the light-space matrix for later use.
+        var driver = Graphics.Driver;
+        var shaderHandle = _shadowDepthShader.Handle;
 
-        // Begin depth-only pass
-        Graphics.Driver.BeginDepthOnlyPass(
+        // Open depth-only render pass
+        driver.BeginDepthOnlyPass(
             _shadowDepthTexture, _shadowConfig.Resolution, _shadowConfig.Resolution);
 
-        // End depth-only pass — depth texture is cleared to 1.0
-        Graphics.Driver.EndDepthOnlyPass();
+        // Draw each shadow caster directly through the driver
+        for (int i = 0; i < _shadowCasters.Count; i++)
+        {
+            var caster = _shadowCasters[i];
+
+            var uniforms = new ShadowDepthUniforms
+            {
+                LightViewProj = _lightViewProjection,
+                Model = caster.WorldMatrix,
+            };
+
+            driver.BindShader(shaderHandle);
+            driver.SetUniform("material", System.Runtime.InteropServices.MemoryMarshal.AsBytes(
+                new ReadOnlySpan<ShadowDepthUniforms>(in uniforms)));
+            driver.BindMesh(caster.MeshHandle);
+            driver.DrawElements(0, caster.IndexCount);
+        }
+
+        driver.EndDepthOnlyPass();
     }
 
-    /// <summary>
-    /// End 3D rendering pass. Restores the 2D orthographic projection
-    /// for NoZ UI overlay rendering.
-    /// </summary>
-    public static void End()
-    {
-        // Restore 2D projection so subsequent UI draws use the correct matrix
-        Graphics.SetPassProjection(_savedProjection);
-        _camera = null;
-        _currentMaterial = null;
-    }
-
-    /// <summary>
-    /// Compute the normal matrix for a given model matrix.
-    /// Returns the transpose of the inverse of the upper 3×3, stored as a full mat4x4
-    /// for GPU alignment. Falls back to the model matrix if inversion fails.
-    /// </summary>
     internal static Matrix4x4 ComputeNormalMatrix(in Matrix4x4 model)
     {
         if (Matrix4x4.Invert(model, out var inverted))
         {
-            // Transpose of the inverse — this is the standard normal matrix
             return Matrix4x4.Transpose(inverted);
         }
 
-        // Singular matrix fallback: use model as-is (correct for rotation + uniform scale)
         return model;
     }
 
     private static void DrawMeshLit(Mesh3D mesh, Matrix4x4 worldMatrix)
     {
         // Upload light UBO once per frame, on first lit draw.
-        // Deferred from Begin() so user can set lights between Begin() and DrawMesh().
         if (!_lightsUploadedThisFrame)
         {
             UploadLightUniforms();
             _lightsUploadedThisFrame = true;
         }
 
+        // Upload shadow UBO once per frame, on first lit+shadow draw.
+        bool useShadowShader = _shadowPassEnabled && _litShadowShader != null && _shadowDepthTexture != 0;
+        if (useShadowShader && !_shadowUniformsUploadedThisFrame)
+        {
+            UploadShadowUniforms();
+            _shadowUniformsUploadedThisFrame = true;
+        }
+
+        // Collect shadow caster for the depth pass
+        if (_shadowPassEnabled)
+        {
+            _shadowCasters.Add(new ShadowCaster
+            {
+                MeshHandle = mesh.RenderMesh.Handle,
+                IndexCount = mesh.IndexCount,
+                WorldMatrix = worldMatrix,
+            });
+        }
+
         // Lit path: globals get VP (view × projection), material gets model + normal matrix.
-        // Pre-transpose VP to cancel NoZ's UploadGlobals transpose.
         Graphics.SetPassProjection(Matrix4x4.Transpose(_viewProjection));
 
-        // SetUniform uploads raw bytes (no auto-transpose like UploadGlobals).
-        // C# row-major bytes naturally map to WGSL column-major layout because the
-        // row-vector/column-vector convention flip cancels the storage order flip.
         var normalMatrix = ComputeNormalMatrix(in worldMatrix);
 
         var uniforms = new LitMaterialUniforms
@@ -464,7 +481,17 @@ public static class Graphics3D
         };
         Graphics.SetUniform("material", in uniforms);
 
-        Graphics.SetShader(_litShader!);
+        if (useShadowShader)
+        {
+            // Bind shadow depth texture for sampling
+            Graphics.Driver.BindDepthTextureForSampling(_shadowDepthTexture, 0);
+            Graphics.SetShader(_litShadowShader!);
+        }
+        else
+        {
+            Graphics.SetShader(_litShader!);
+        }
+
         Graphics.SetTexture(_currentMaterial.BaseColorTexture, 0, TextureFilter.Linear);
         Graphics.SetMesh(mesh.RenderMesh);
         Graphics.DrawElements(mesh.IndexCount, 0);
@@ -472,7 +499,17 @@ public static class Graphics3D
 
     private static void DrawMeshUnlit(Mesh3D mesh, Matrix4x4 worldMatrix)
     {
-        // Unlit/textured path: globals get full MVP (model × view × projection).
+        // Collect shadow caster for unlit meshes too (they cast shadows even if not lit)
+        if (_shadowPassEnabled)
+        {
+            _shadowCasters.Add(new ShadowCaster
+            {
+                MeshHandle = mesh.RenderMesh.Handle,
+                IndexCount = mesh.IndexCount,
+                WorldMatrix = worldMatrix,
+            });
+        }
+
         var mvp = worldMatrix * _viewProjection;
         Graphics.SetPassProjection(Matrix4x4.Transpose(mvp));
 
@@ -525,6 +562,32 @@ public static class Graphics3D
         }
 
         Graphics.SetUniform("lights", in uniforms);
+    }
+
+    private static void UploadShadowUniforms()
+    {
+        // Light VP is computed later in ExecuteShadowPass, but we need a preliminary
+        // computation now so the lit shader can project fragments into light space.
+        // This is re-computed in ExecuteShadowPass too (same result).
+        if (_camera == null) return;
+
+        var directional = _lights.Directional;
+        var (lightView, lightProj) = LightSpaceComputer.Compute(
+            in directional, _camera, _shadowConfig.ShadowDistance);
+        _lightViewProjection = lightView * lightProj;
+
+        float texelSize = 1.0f / _shadowConfig.Resolution;
+
+        var uniforms = new ShadowUniforms
+        {
+            LightViewProj = _lightViewProjection,
+            ShadowBias = _shadowConfig.DepthBias,
+            NormalBias = _shadowConfig.NormalBias,
+            TexelSizeX = texelSize,
+            TexelSizeY = texelSize,
+        };
+
+        Graphics.SetUniform("shadow", in uniforms);
     }
 
     private static Shader CreateShaderFromEmbedded(
