@@ -87,7 +87,6 @@ public static class JointMatrixComputer
 
         // Subsequent passes: add joints whose parent is already processed
         // Max depth = count (degenerate chain), typically 2-3 passes
-        int start = 0;
         while (written < count)
         {
             int prevWritten = written;
