@@ -141,15 +141,9 @@ public class HelloCubeApp : IApplication
         var staticWorld = _modelTransform.LocalMatrix
             * Matrix4x4.CreateTranslation(-2f, 0, 0);
 
-        // Shadow pass — renders depth from directional light's perspective
-        Graphics3D.RenderShadowPass(drawMesh =>
-        {
-            // Draw static model into shadow map
-            foreach (var group in _model.MeshGroups)
-                foreach (var prim in group.Primitives)
-                    if (prim.Mesh != null)
-                        drawMesh(prim.Mesh, staticWorld);
-        });
+        // Shadow pass — exercises depth-only pass infrastructure
+        // (no actual rendering into depth texture until Phase 6b adds batch integration)
+        Graphics3D.RenderShadowPass();
 
         // Draw static model on the left
         Graphics3D.DrawModel(_model, staticWorld);

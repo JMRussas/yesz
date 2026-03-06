@@ -380,7 +380,7 @@ public static class Graphics3D
         _shadowConfig = config;
     }
 
-    public static void RenderShadowPass(Action<Action<Mesh3D, Matrix4x4>> drawScene)
+    public static void RenderShadowPass()
     {
         if (_camera == null || _shadowDepthShader == null || _shadowDepthTexture == 0) return;
 
@@ -390,38 +390,20 @@ public static class Graphics3D
             in directional, _camera, _shadowConfig.ShadowDistance);
         _lightViewProjection = lightView * lightProj;
 
+        // NOTE: NoZ's batch system defers draw commands for later execution during
+        // the scene pass. The depth-only pass opens/closes immediately at the driver
+        // level, so draw commands issued here don't actually execute in this pass —
+        // they queue into the scene pass batch instead. Phase 6b will add immediate-
+        // mode rendering or a separate command buffer to make draws execute within
+        // the depth-only pass. For now, this exercises the pass infrastructure and
+        // computes the light-space matrix for later use.
+
         // Begin depth-only pass
         Graphics.Driver.BeginDepthOnlyPass(
             _shadowDepthTexture, _shadowConfig.Resolution, _shadowConfig.Resolution);
 
-        // Set light VP as the globals projection (pre-transpose for NoZ's UploadGlobals)
-        Graphics.SetPassProjection(Matrix4x4.Transpose(_lightViewProjection));
-
-        // Draw scene geometry using shadow depth shader
-        drawScene(DrawMeshShadow);
-
-        // End depth-only pass
+        // End depth-only pass — depth texture is cleared to 1.0
         Graphics.Driver.EndDepthOnlyPass();
-    }
-
-    private static void DrawMeshShadow(Mesh3D mesh, Matrix4x4 worldMatrix)
-    {
-        if (_shadowDepthShader == null) return;
-
-        // Material UBO carries the model matrix (same struct as lit path)
-        var uniforms = new LitMaterialUniforms
-        {
-            Model = worldMatrix,
-            NormalMatrix = Matrix4x4.Identity,
-            BaseColorFactor = Vector4.One,
-            Metallic = 0,
-            Roughness = 1,
-        };
-        Graphics.SetUniform("material", in uniforms);
-
-        Graphics.SetShader(_shadowDepthShader);
-        Graphics.SetMesh(mesh.RenderMesh);
-        Graphics.DrawElements(mesh.IndexCount, 0);
     }
 
     /// <summary>
