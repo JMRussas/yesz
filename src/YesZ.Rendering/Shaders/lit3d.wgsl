@@ -1,7 +1,8 @@
-// YesZ — Lit 3D shader (Blinn-Phong)
+// YesZ — Lit 3D shader (Blinn-Phong, multi-light)
 //
 // Transforms vertices by Model (material UBO) and VP (globals).
-// Computes Lambertian diffuse + Blinn-Phong specular + ambient.
+// Evaluates directional light + up to 8 point lights with smooth attenuation.
+// Computes Lambertian diffuse + Blinn-Phong specular + ambient per light.
 // Samples base color texture, multiplies by vertex color and material color factor.
 //
 // Flags: ShaderFlags.Depth | ShaderFlags.DepthLess
@@ -25,11 +26,21 @@ struct Material {
 @group(0) @binding(2) var base_color_texture: texture_2d<f32>;
 @group(0) @binding(3) var base_color_sampler: sampler;
 
+struct PointLightData {
+    position: vec4f,   // xyz = world position, w = range
+    color: vec4f,      // xyz = color * intensity, w = unused
+}
+
 struct Lights {
     ambient_color: vec4f,
     directional_dir: vec4f,
     directional_color: vec4f,
     camera_position: vec4f,
+    point_light_count: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+    point_lights: array<PointLightData, 8>,
 }
 @group(0) @binding(4) var<uniform> lights: Lights;
 
@@ -46,6 +57,13 @@ struct VertexOutput {
     @location(1) world_normal: vec3f,
     @location(2) uv: vec2f,
     @location(3) color: vec4f,
+}
+
+// Smooth quadratic falloff: reaches exactly zero at distance = range.
+fn attenuate(distance: f32, range: f32) -> f32 {
+    let ratio = clamp(distance / range, 0.0, 1.0);
+    let falloff = 1.0 - ratio * ratio;
+    return falloff * falloff;
 }
 
 @vertex fn vs_main(in: VertexInput) -> VertexOutput {
@@ -66,23 +84,38 @@ struct VertexOutput {
 
     let N = normalize(in.world_normal);
     let V = normalize(lights.camera_position.xyz - in.world_position);
-    let L = normalize(-lights.directional_dir.xyz);  // negate: stored direction is toward scene
+    let shininess = mix(8.0, 256.0, 1.0 - material.roughness);
+    let specular_strength = mix(0.04, 1.0, material.metallic);
 
-    // Diffuse (Lambertian)
-    let NdotL = max(dot(N, L), 0.0);
-    let diffuse = lights.directional_color.xyz * NdotL;
+    var total_diffuse = lights.ambient_color.xyz;
+    var total_specular = vec3f(0.0);
 
-    // Specular (Blinn-Phong) — only on front-lit faces
-    var specular = vec3f(0.0);
-    if (NdotL > 0.0) {
-        let H = normalize(V + L);
-        let NdotH = max(dot(N, H), 0.0);
-        let shininess = mix(8.0, 256.0, 1.0 - material.roughness);
-        specular = lights.directional_color.xyz * pow(NdotH, shininess)
-                   * mix(0.04, 1.0, material.metallic);
+    // Directional light
+    {
+        let L = normalize(-lights.directional_dir.xyz);
+        let NdotL = max(dot(N, L), 0.0);
+        total_diffuse += lights.directional_color.xyz * NdotL;
+        if (NdotL > 0.0) {
+            let H = normalize(V + L);
+            total_specular += lights.directional_color.xyz * pow(max(dot(N, H), 0.0), shininess);
+        }
     }
 
-    let ambient = lights.ambient_color.xyz;
-    let final_color = base_color.rgb * (ambient + diffuse) + specular;
+    // Point lights
+    for (var i = 0u; i < lights.point_light_count; i++) {
+        let light = lights.point_lights[i];
+        let light_vec = light.position.xyz - in.world_position;
+        let distance = length(light_vec);
+        let L = light_vec / distance;
+        let atten = attenuate(distance, light.position.w);
+        let NdotL = max(dot(N, L), 0.0);
+        total_diffuse += light.color.xyz * NdotL * atten;
+        if (NdotL > 0.0) {
+            let H = normalize(V + L);
+            total_specular += light.color.xyz * pow(max(dot(N, H), 0.0), shininess) * atten;
+        }
+    }
+
+    let final_color = base_color.rgb * total_diffuse + total_specular * specular_strength;
     return vec4f(final_color, base_color.a);
 }

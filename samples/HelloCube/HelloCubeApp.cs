@@ -1,12 +1,13 @@
 //  YesZ - HelloCube Application
 //
-//  Renders a spinning lit cube with directional and ambient lighting.
-//  Demonstrates Graphics3D lit material system with Blinn-Phong shading.
+//  Renders a spinning lit cube with directional, ambient, and point lighting.
+//  Demonstrates Graphics3D multi-light system with Blinn-Phong shading.
 //
-//  Depends on: YesZ.Core (Camera3D, Transform3D, Mesh3D, Mesh3DBuilder, DirectionalLight, AmbientLight),
+//  Depends on: YesZ.Core (Camera3D, Transform3D, Mesh3D, Mesh3DBuilder, DirectionalLight, AmbientLight, PointLight),
 //              YesZ.Rendering (Graphics3D, Material3D, TextureLoader), NoZ (IApplication, Graphics, UI, Color, Time)
 //  Used by:    Program.cs
 
+using System;
 using System.Numerics;
 using NoZ;
 using YesZ;
@@ -114,6 +115,16 @@ public class HelloCubeApp : IApplication
             Intensity = 0.15f,
         });
 
+        // Point light — orbits the cube to show position-based attenuation
+        float orbitAngle = _rotationAngle * 0.8f;
+        Graphics3D.AddPointLight(new PointLight
+        {
+            Position = new Vector3(MathF.Cos(orbitAngle) * 3f, 1.5f, MathF.Sin(orbitAngle) * 3f),
+            Color = new Vector3(0.3f, 0.6f, 1.0f),
+            Intensity = 2.5f,
+            Range = 8f,
+        });
+
         Graphics3D.SetMaterial(_material);
         Graphics3D.DrawMesh(_cube, _cubeTransform.LocalMatrix);
         Graphics3D.End();
@@ -126,7 +137,7 @@ public class HelloCubeApp : IApplication
             using (UI.BeginColumn(BoxStyle))
             {
                 UI.Label("YesZ", TitleStyle);
-                UI.Label("Phase 3b - Lit Shading", SubtitleStyle);
+                UI.Label("Phase 3c - Multi-Light", SubtitleStyle);
             }
         }
     }

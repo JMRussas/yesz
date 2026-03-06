@@ -955,7 +955,9 @@ WGSL has no preprocessor directives. Unlike HLSL/GLSL which support `#ifdef`, WG
 
 ---
 
-## Phase 3c: Multi-Light + Point Lights
+## Phase 3c: Multi-Light + Point Lights ✅
+
+**Status:** Complete
 
 **Milestone:** HelloCube with directional + point light(s) showing position-based attenuation.
 

@@ -302,7 +302,20 @@ public static class Graphics3D
             DirectionalDir = new Vector4(dir.Direction, 0),
             DirectionalColor = new Vector4(dir.EffectiveColor, 0),
             CameraPosition = new Vector4(_camera.Position, 0),
+            PointLightCount = (uint)_lights.PointLightCount,
         };
+
+        var pointLights = _lights.PointLights;
+        for (int i = 0; i < pointLights.Length; i++)
+        {
+            ref readonly var pl = ref pointLights[i];
+            uniforms.SetPointLight(i, new PointLightData
+            {
+                Position = new Vector4(pl.Position, pl.Range),
+                Color = new Vector4(pl.EffectiveColor, 0),
+            });
+        }
+
         Graphics.SetUniform("lights", in uniforms);
     }
 
