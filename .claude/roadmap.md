@@ -15,8 +15,8 @@
 | 4b | Model Rendering | HelloCube loads and displays a textured glTF model | 4a, 2 | Done |
 | 4c | Multi-Mesh + Hierarchy | Complex multi-part glTF model renders correctly | 4b | Done |
 | 5a | Skeleton & Animation Data | Unit tests parse skinned .glb, produce correct skeleton + keyframes | 4a | Done |
-| 5b | Skinned Vertex Format | Skinned vertex type + shader variant compile and register | 1b, 5a | Not started |
-| 5c | Animation Playback | AnimationPlayer3D produces correct joint transforms at any time | 5a | Not started |
+| 5b | Skinned Vertex Format | Skinned vertex type + shader variant compile and register | 1b, 5a | **Done** |
+| 5c | Animation Playback | AnimationPlayer3D produces correct joint transforms at any time | 5a | **Done** |
 | 5d | GPU Skinning | Sample app loads and displays an animated skinned glTF model | 5b, 5c, 2 | **Done** |
 | 6a | Shadow Map Infrastructure | Depth-only render pass produces valid shadow texture | 3c, 1a | **Done** |
 | 6b | Directional Shadows | Scene renders with directional light shadows + PCF | 6a | **Done** |

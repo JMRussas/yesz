@@ -171,7 +171,7 @@ public class HelloCubeApp : IApplication
             using (UI.BeginColumn(BoxStyle))
             {
                 UI.Label("YesZ", TitleStyle);
-                UI.Label("Phase 6b - Shadow Sampling", SubtitleStyle);
+                UI.Label("Phase 6c - Cascaded Shadows", SubtitleStyle);
             }
         }
     }

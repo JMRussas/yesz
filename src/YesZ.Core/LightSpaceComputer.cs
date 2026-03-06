@@ -15,10 +15,22 @@ namespace YesZ;
 
 public static class LightSpaceComputer
 {
+    /// <summary>
+    /// Compute light-space matrices for the full shadow frustum (near plane to shadowDistance).
+    /// </summary>
     public static (Matrix4x4 View, Matrix4x4 Projection) Compute(
         in DirectionalLight light, Camera3D camera, float shadowDistance)
     {
-        var corners = camera.GetFrustumCorners(camera.NearPlane, Math.Min(shadowDistance, camera.FarPlane));
+        return Compute(in light, camera, camera.NearPlane, Math.Min(shadowDistance, camera.FarPlane));
+    }
+
+    /// <summary>
+    /// Compute light-space matrices for a specific frustum slice (used by cascaded shadow maps).
+    /// </summary>
+    public static (Matrix4x4 View, Matrix4x4 Projection) Compute(
+        in DirectionalLight light, Camera3D camera, float near, float far)
+    {
+        var corners = camera.GetFrustumCorners(near, far);
 
         // Frustum center
         var center = Vector3.Zero;
@@ -26,7 +38,9 @@ public static class LightSpaceComputer
             center += corners[i];
         center /= corners.Length;
 
-        // Light view: look from behind center along light direction
+        // Light view: look from behind center along light direction.
+        // Pull back by the frustum diagonal to ensure all casters are captured.
+        float pullBack = (far - near) + Vector3.Distance(corners[0], corners[6]);
         var lightDir = Vector3.Normalize(light.Direction);
 
         // Pick a stable up vector — avoid degenerate case when light is nearly vertical
@@ -35,7 +49,7 @@ public static class LightSpaceComputer
             : Vector3.UnitY;
 
         var lightView = Matrix4x4.CreateLookAt(
-            center - lightDir * shadowDistance,
+            center - lightDir * pullBack,
             center,
             up);
 

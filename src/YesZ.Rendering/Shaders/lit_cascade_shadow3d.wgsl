@@ -1,9 +1,9 @@
-// YesZ — Lit 3D shader with shadow mapping (Blinn-Phong, multi-light, PCF shadows)
+// YesZ — Lit 3D shader with cascaded shadow mapping (Blinn-Phong, multi-light, CSM + PCF)
 //
-// Extends lit3d.wgsl with directional light shadow sampling.
+// Extends lit3d.wgsl with cascaded directional light shadow sampling.
 // Transforms vertices by Model (material UBO) and VP (globals).
 // Evaluates directional light + up to 8 point lights with smooth attenuation.
-// Applies shadow factor to directional light using textureLoad + PCF 3×3.
+// Selects shadow cascade based on distance from camera, applies PCF 3×3 per cascade.
 //
 // Flags: ShaderFlags.Depth | ShaderFlags.DepthLess
 
@@ -44,14 +44,21 @@ struct Lights {
 }
 @group(0) @binding(4) var<uniform> lights: Lights;
 
-struct ShadowData {
-    light_view_proj: mat4x4f,
+struct CascadeShadowData {
+    light_view_proj: array<mat4x4f, 4>,  // one VP matrix per cascade
+    split_depths: vec4f,                  // camera-distance split boundaries
+    cascade_count: u32,
     shadow_bias: f32,
     normal_bias: f32,
-    texel_size: vec2f,     // 1.0 / shadow_map_resolution
+    texel_size: f32,
 }
-@group(0) @binding(5) var<uniform> shadow: ShadowData;
-@group(0) @binding(6) var shadow_map: texture_depth_2d;
+@group(0) @binding(5) var<uniform> shadow: CascadeShadowData;
+
+// One depth texture per cascade (max 4)
+@group(0) @binding(6) var shadow_map_0: texture_depth_2d;
+@group(0) @binding(7) var shadow_map_1: texture_depth_2d;
+@group(0) @binding(8) var shadow_map_2: texture_depth_2d;
+@group(0) @binding(9) var shadow_map_3: texture_depth_2d;
 
 struct VertexInput {
     @location(0) position: vec3f,
@@ -75,28 +82,35 @@ fn attenuate(distance: f32, range: f32) -> f32 {
     return falloff * falloff;
 }
 
-fn compute_shadow(world_pos: vec3f, world_normal: vec3f, NdotL: f32) -> f32 {
-    // Normal offset: push sample point along normal to reduce acne
-    let offset_pos = world_pos + world_normal * shadow.normal_bias;
-
-    // Project into light space
-    let light_clip = shadow.light_view_proj * vec4f(offset_pos, 1.0);
-    let light_ndc = light_clip.xyz / light_clip.w;
-
-    // NDC [-1,1] → UV [0,1] (WebGPU: Y is flipped vs OpenGL)
-    let shadow_uv = vec2f(light_ndc.x * 0.5 + 0.5, -light_ndc.y * 0.5 + 0.5);
-
-    // Out-of-bounds check
-    if (shadow_uv.x < 0.0 || shadow_uv.x > 1.0 || shadow_uv.y < 0.0 || shadow_uv.y > 1.0) {
-        return 1.0;  // No shadow outside shadow map
+// Select cascade based on distance from camera.
+fn get_cascade_index(dist: f32) -> u32 {
+    for (var i = 0u; i < shadow.cascade_count - 1u; i++) {
+        if (dist < shadow.split_depths[i]) {
+            return i;
+        }
     }
+    return shadow.cascade_count - 1u;
+}
 
-    // Slope-scaled bias: more bias at grazing angles where acne is worst
-    let bias = max(shadow.shadow_bias * (1.0 - NdotL), shadow.shadow_bias * 0.1);
-    let compare_depth = light_ndc.z - bias;
+// PCF 3×3 on a specific cascade's depth texture.
+fn pcf_sample_0(shadow_uv: vec2f, compare_depth: f32) -> f32 {
+    let dim = textureDimensions(shadow_map_0);
+    return pcf_kernel(shadow_map_0, dim, shadow_uv, compare_depth);
+}
+fn pcf_sample_1(shadow_uv: vec2f, compare_depth: f32) -> f32 {
+    let dim = textureDimensions(shadow_map_1);
+    return pcf_kernel(shadow_map_1, dim, shadow_uv, compare_depth);
+}
+fn pcf_sample_2(shadow_uv: vec2f, compare_depth: f32) -> f32 {
+    let dim = textureDimensions(shadow_map_2);
+    return pcf_kernel(shadow_map_2, dim, shadow_uv, compare_depth);
+}
+fn pcf_sample_3(shadow_uv: vec2f, compare_depth: f32) -> f32 {
+    let dim = textureDimensions(shadow_map_3);
+    return pcf_kernel(shadow_map_3, dim, shadow_uv, compare_depth);
+}
 
-    // PCF 3×3 using textureLoad (manual depth comparison, no comparison sampler needed)
-    let dim = textureDimensions(shadow_map);
+fn pcf_kernel(shadow_map: texture_depth_2d, dim: vec2u, shadow_uv: vec2f, compare_depth: f32) -> f32 {
     let texel = vec2i(shadow_uv * vec2f(dim));
     var shadow_sum = 0.0;
     for (var y = -1; y <= 1; y++) {
@@ -107,11 +121,45 @@ fn compute_shadow(world_pos: vec3f, world_normal: vec3f, NdotL: f32) -> f32 {
                 let shadow_depth = textureLoad(shadow_map, sample_texel, 0);
                 shadow_sum += select(0.0, 1.0, compare_depth <= shadow_depth);
             } else {
-                shadow_sum += 1.0;  // Outside shadow map = lit
+                shadow_sum += 1.0;
             }
         }
     }
     return shadow_sum / 9.0;
+}
+
+fn compute_cascaded_shadow(world_pos: vec3f, world_normal: vec3f, NdotL: f32) -> f32 {
+    // Select cascade by distance from camera
+    let dist = length(lights.camera_position.xyz - world_pos);
+    let cascade = get_cascade_index(dist);
+
+    // Normal offset: push sample point along normal to reduce acne
+    let offset_pos = world_pos + world_normal * shadow.normal_bias;
+
+    // Project into selected cascade's light space
+    let light_clip = shadow.light_view_proj[cascade] * vec4f(offset_pos, 1.0);
+    let light_ndc = light_clip.xyz / light_clip.w;
+
+    // NDC [-1,1] → UV [0,1] (WebGPU: Y is flipped vs OpenGL)
+    let shadow_uv = vec2f(light_ndc.x * 0.5 + 0.5, -light_ndc.y * 0.5 + 0.5);
+
+    // Out-of-bounds: no shadow
+    if (shadow_uv.x < 0.0 || shadow_uv.x > 1.0 || shadow_uv.y < 0.0 || shadow_uv.y > 1.0) {
+        return 1.0;
+    }
+
+    // Slope-scaled bias
+    let bias = max(shadow.shadow_bias * (1.0 - NdotL), shadow.shadow_bias * 0.1);
+    let compare_depth = light_ndc.z - bias;
+
+    // Sample from the correct cascade's depth texture
+    switch cascade {
+        case 0u: { return pcf_sample_0(shadow_uv, compare_depth); }
+        case 1u: { return pcf_sample_1(shadow_uv, compare_depth); }
+        case 2u: { return pcf_sample_2(shadow_uv, compare_depth); }
+        case 3u: { return pcf_sample_3(shadow_uv, compare_depth); }
+        default: { return 1.0; }
+    }
 }
 
 @vertex fn vs_main(in: VertexInput) -> VertexOutput {
@@ -138,11 +186,11 @@ fn compute_shadow(world_pos: vec3f, world_normal: vec3f, NdotL: f32) -> f32 {
     var total_diffuse = lights.ambient_color.xyz;
     var total_specular = vec3f(0.0);
 
-    // Directional light with shadow
+    // Directional light with cascaded shadow
     {
         let L = normalize(-lights.directional_dir.xyz);
         let NdotL = max(dot(N, L), 0.0);
-        let shadow_factor = compute_shadow(in.world_position, N, NdotL);
+        let shadow_factor = compute_cascaded_shadow(in.world_position, N, NdotL);
         total_diffuse += lights.directional_color.xyz * NdotL * shadow_factor;
         if (NdotL > 0.0) {
             let H = normalize(V + L);

@@ -13,9 +13,9 @@
 //    Lit — VP in globals, model + normal matrix in LitMaterialUniforms (@binding 1),
 //      light data in LightUniforms (@binding 4). Per-batch uniform snapshots ensure
 //      each draw gets the correct material/light data during deferred execution.
-//    Lit+Shadow — Same as Lit, plus ShadowUniforms (@binding 5) and shadow depth
-//      texture (@binding 6). Shadow pass renders scene to depth-only texture via
-//      direct driver calls (bypassing batch system) before the scene pass.
+//    Lit+Shadow (CSM) — Same as Lit, plus CascadeShadowUniforms (@binding 5) and
+//      up to 4 cascade depth textures (@bindings 6-9). Shadow pass renders scene
+//      to N depth-only textures via direct driver calls before the scene pass.
 //
 //  Matrix convention: SetPassProjection pre-transposes to cancel NoZ's UploadGlobals
 //  transpose. SetUniform uploads raw bytes — C# row-major naturally maps to WGSL
@@ -25,7 +25,7 @@
 //  Depends on: YesZ.Core (Camera3D, Mesh3D, MeshVertex3D, LightEnvironment, DirectionalLight, PointLight, AmbientLight,
 //              LightSpaceComputer),
 //              YesZ.Rendering (Material3D, MaterialUniforms, LitMaterialUniforms, LightUniforms,
-//              ShadowDepthUniforms, ShadowUniforms, ShadowConfig),
+//              ShadowDepthUniforms, CascadeShadowUniforms, ShadowConfig),
 //              NoZ (Graphics, Shader, ShaderFlags, ShaderBinding, ShaderBindingType, TextureFormat, TextureFilter)
 //  Used by:    Game code, samples
 
@@ -40,7 +40,7 @@ public static class Graphics3D
     private static Shader? _unlitShader;
     private static Shader? _texturedShader;
     private static Shader? _litShader;
-    private static Shader? _litShadowShader;
+    private static Shader? _litCascadeShadowShader;
     private static Shader? _skinnedLitShader;
     private static Shader? _shadowDepthShader;
     private static Camera3D? _camera;
@@ -53,10 +53,11 @@ public static class Graphics3D
     private static bool _lightsUploadedThisFrame;
     private static bool _shadowUniformsUploadedThisFrame;
 
-    // Shadow mapping state
-    private static nuint _shadowDepthTexture;
+    // Cascaded shadow mapping state
+    private static readonly nuint[] _shadowDepthTextures = new nuint[ShadowConfig.MaxCascades];
     private static ShadowConfig _shadowConfig = new();
-    private static Matrix4x4 _lightViewProjection;
+    private static readonly Matrix4x4[] _cascadeLightViewProjections = new Matrix4x4[ShadowConfig.MaxCascades];
+    private static float[]? _cascadeSplits;
 
     // Shadow caster collection — populated during DrawModel/DrawMesh, consumed in End()
     private struct ShadowCaster
@@ -112,10 +113,10 @@ public static class Graphics3D
                 new() { Binding = 4, Type = ShaderBindingType.UniformBuffer, Name = "lights" },
             });
 
-        // Lit + shadow shader (Blinn-Phong + PCF shadow mapping)
-        _litShadowShader = CreateShaderFromEmbedded(
-            "YesZ.Rendering.Shaders.lit_shadow3d.wgsl",
-            "lit_shadow3d",
+        // Lit + cascaded shadow shader (Blinn-Phong + CSM + PCF)
+        _litCascadeShadowShader = CreateShaderFromEmbedded(
+            "YesZ.Rendering.Shaders.lit_cascade_shadow3d.wgsl",
+            "lit_cascade_shadow3d",
             flags,
             new List<ShaderBinding>
             {
@@ -125,7 +126,10 @@ public static class Graphics3D
                 new() { Binding = 3, Type = ShaderBindingType.Sampler, Name = "base_color_sampler" },
                 new() { Binding = 4, Type = ShaderBindingType.UniformBuffer, Name = "lights" },
                 new() { Binding = 5, Type = ShaderBindingType.UniformBuffer, Name = "shadow" },
-                new() { Binding = 6, Type = ShaderBindingType.DepthTexture2D, Name = "shadow_map" },
+                new() { Binding = 6, Type = ShaderBindingType.DepthTexture2D, Name = "shadow_map_0" },
+                new() { Binding = 7, Type = ShaderBindingType.DepthTexture2D, Name = "shadow_map_1" },
+                new() { Binding = 8, Type = ShaderBindingType.DepthTexture2D, Name = "shadow_map_2" },
+                new() { Binding = 9, Type = ShaderBindingType.DepthTexture2D, Name = "shadow_map_3" },
             });
 
         // Skinned lit shader (skeletal animation + Blinn-Phong)
@@ -157,9 +161,12 @@ public static class Graphics3D
         var white = new byte[] { 255, 255, 255, 255 };
         _defaultWhiteTexture = Graphics.Driver.CreateTexture(1, 1, white, TextureFormat.RGBA8, TextureFilter.Point, "DefaultWhite");
 
-        // Create shadow map depth texture
-        _shadowDepthTexture = Graphics.Driver.CreateDepthTexture(
-            _shadowConfig.Resolution, _shadowConfig.Resolution, "ShadowMap");
+        // Create shadow map depth textures (one per cascade, max 4)
+        for (int i = 0; i < ShadowConfig.MaxCascades; i++)
+        {
+            _shadowDepthTextures[i] = Graphics.Driver.CreateDepthTexture(
+                _shadowConfig.Resolution, _shadowConfig.Resolution, $"ShadowMap_Cascade{i}");
+        }
 
         _initialized = true;
     }
@@ -393,8 +400,8 @@ public static class Graphics3D
             DrawNodeAnimated(child, world, model, jointMatrices);
     }
 
-    public static nuint ShadowDepthTextureHandle => _shadowDepthTexture;
-    public static Matrix4x4 LightViewProjection => _lightViewProjection;
+    public static nuint ShadowDepthTextureHandle => _shadowDepthTextures[0];
+    public static Matrix4x4 LightViewProjection => _cascadeLightViewProjections[0];
     public static ShadowConfig ShadowSettings => _shadowConfig;
 
     public static void ConfigureShadows(ShadowConfig config)
@@ -404,10 +411,13 @@ public static class Graphics3D
 
         if (config.Resolution != _shadowConfig.Resolution)
         {
-            if (_shadowDepthTexture != 0)
-                Graphics.Driver.DestroyDepthTexture(_shadowDepthTexture);
-            _shadowDepthTexture = Graphics.Driver.CreateDepthTexture(
-                config.Resolution, config.Resolution, "ShadowMap");
+            for (int i = 0; i < ShadowConfig.MaxCascades; i++)
+            {
+                if (_shadowDepthTextures[i] != 0)
+                    Graphics.Driver.DestroyDepthTexture(_shadowDepthTextures[i]);
+                _shadowDepthTextures[i] = Graphics.Driver.CreateDepthTexture(
+                    config.Resolution, config.Resolution, $"ShadowMap_Cascade{i}");
+            }
         }
         _shadowConfig = config;
     }
@@ -439,44 +449,55 @@ public static class Graphics3D
 
     private static void ExecuteShadowPass()
     {
-        if (_camera == null || _shadowDepthShader == null || _shadowDepthTexture == 0)
+        if (_camera == null || _shadowDepthShader == null)
             return;
 
         if (_shadowCasters.Count == 0)
             return;
 
-        // Compute light-space matrices from directional light
         var directional = _lights.Directional;
-        var (lightView, lightProj) = LightSpaceComputer.Compute(
-            in directional, _camera, _shadowConfig.ShadowDistance);
-        _lightViewProjection = lightView * lightProj;
+        int cascadeCount = Math.Clamp(_shadowConfig.CascadeCount, 1, ShadowConfig.MaxCascades);
+
+        // Compute cascade split distances
+        _cascadeSplits = CascadeSplitComputer.ComputeSplits(
+            _camera.NearPlane,
+            Math.Min(_shadowConfig.ShadowDistance, _camera.FarPlane),
+            cascadeCount,
+            _shadowConfig.Lambda);
 
         var driver = Graphics.Driver;
         var shaderHandle = _shadowDepthShader.Handle;
 
-        // Open depth-only render pass
-        driver.BeginDepthOnlyPass(
-            _shadowDepthTexture, _shadowConfig.Resolution, _shadowConfig.Resolution);
-
-        // Draw each shadow caster directly through the driver
-        for (int i = 0; i < _shadowCasters.Count; i++)
+        // Render each cascade's depth map
+        for (int cascade = 0; cascade < cascadeCount; cascade++)
         {
-            var caster = _shadowCasters[i];
+            // Compute tight light-space VP for this cascade's frustum slice
+            var (lightView, lightProj) = LightSpaceComputer.Compute(
+                in directional, _camera, _cascadeSplits[cascade], _cascadeSplits[cascade + 1]);
+            _cascadeLightViewProjections[cascade] = lightView * lightProj;
 
-            var uniforms = new ShadowDepthUniforms
+            driver.BeginDepthOnlyPass(
+                _shadowDepthTextures[cascade], _shadowConfig.Resolution, _shadowConfig.Resolution);
+
+            for (int i = 0; i < _shadowCasters.Count; i++)
             {
-                LightViewProj = _lightViewProjection,
-                Model = caster.WorldMatrix,
-            };
+                var caster = _shadowCasters[i];
 
-            driver.BindShader(shaderHandle);
-            driver.SetUniform("material", System.Runtime.InteropServices.MemoryMarshal.AsBytes(
-                new ReadOnlySpan<ShadowDepthUniforms>(in uniforms)));
-            driver.BindMesh(caster.MeshHandle);
-            driver.DrawElements(0, caster.IndexCount);
+                var uniforms = new ShadowDepthUniforms
+                {
+                    LightViewProj = _cascadeLightViewProjections[cascade],
+                    Model = caster.WorldMatrix,
+                };
+
+                driver.BindShader(shaderHandle);
+                driver.SetUniform("material", System.Runtime.InteropServices.MemoryMarshal.AsBytes(
+                    new ReadOnlySpan<ShadowDepthUniforms>(in uniforms)));
+                driver.BindMesh(caster.MeshHandle);
+                driver.DrawElements(0, caster.IndexCount);
+            }
+
+            driver.EndDepthOnlyPass();
         }
-
-        driver.EndDepthOnlyPass();
     }
 
     /// <summary>
@@ -504,11 +525,11 @@ public static class Graphics3D
             _lightsUploadedThisFrame = true;
         }
 
-        // Upload shadow UBO once per frame, on first lit+shadow draw.
-        bool useShadowShader = _shadowPassEnabled && _litShadowShader != null && _shadowDepthTexture != 0;
+        // Upload cascade shadow UBO once per frame, on first lit+shadow draw.
+        bool useShadowShader = _shadowPassEnabled && _litCascadeShadowShader != null && _shadowDepthTextures[0] != 0;
         if (useShadowShader && !_shadowUniformsUploadedThisFrame)
         {
-            UploadShadowUniforms();
+            UploadCascadeShadowUniforms();
             _shadowUniformsUploadedThisFrame = true;
         }
 
@@ -540,9 +561,10 @@ public static class Graphics3D
 
         if (useShadowShader)
         {
-            // Bind shadow depth texture for sampling
-            Graphics.Driver.BindDepthTextureForSampling(_shadowDepthTexture, 0);
-            Graphics.SetShader(_litShadowShader!);
+            // Bind all cascade depth textures — each slot maps to a DepthTexture2D binding
+            for (int i = 0; i < ShadowConfig.MaxCascades; i++)
+                Graphics.Driver.BindDepthTextureForSampling(_shadowDepthTextures[i], i);
+            Graphics.SetShader(_litCascadeShadowShader!);
         }
         else
         {
@@ -621,28 +643,45 @@ public static class Graphics3D
         Graphics.SetUniform("lights", in uniforms);
     }
 
-    private static void UploadShadowUniforms()
+    private static void UploadCascadeShadowUniforms()
     {
-        // Light VP is computed later in ExecuteShadowPass, but we need a preliminary
-        // computation now so the lit shader can project fragments into light space.
-        // This is re-computed in ExecuteShadowPass too (same result).
+        // Compute cascade splits and light VP matrices now so the lit shader
+        // can project fragments into light space. These are re-computed in
+        // ExecuteShadowPass too (same result since camera/lights don't change).
         if (_camera == null) return;
 
         var directional = _lights.Directional;
-        var (lightView, lightProj) = LightSpaceComputer.Compute(
-            in directional, _camera, _shadowConfig.ShadowDistance);
-        _lightViewProjection = lightView * lightProj;
+        int cascadeCount = Math.Clamp(_shadowConfig.CascadeCount, 1, ShadowConfig.MaxCascades);
+        float shadowFar = Math.Min(_shadowConfig.ShadowDistance, _camera.FarPlane);
 
-        float texelSize = 1.0f / _shadowConfig.Resolution;
+        _cascadeSplits = CascadeSplitComputer.ComputeSplits(
+            _camera.NearPlane, shadowFar, cascadeCount, _shadowConfig.Lambda);
 
-        var uniforms = new ShadowUniforms
+        var uniforms = new CascadeShadowUniforms
         {
-            LightViewProj = _lightViewProjection,
+            CascadeCount = (uint)cascadeCount,
             ShadowBias = _shadowConfig.DepthBias,
             NormalBias = _shadowConfig.NormalBias,
-            TexelSizeX = texelSize,
-            TexelSizeY = texelSize,
+            TexelSize = 1.0f / _shadowConfig.Resolution,
         };
+
+        // Store split depths as distances from camera (used by cascade selection in shader).
+        // splits[0] = near, splits[1..N] = cascade boundaries, splits[N] = far.
+        // The shader compares fragment distance against splits[0..N-1] to select cascade.
+        var splitDepths = new Vector4(
+            cascadeCount > 1 ? _cascadeSplits[1] : shadowFar,
+            cascadeCount > 2 ? _cascadeSplits[2] : shadowFar,
+            cascadeCount > 3 ? _cascadeSplits[3] : shadowFar,
+            shadowFar);
+        uniforms.SplitDepths = splitDepths;
+
+        for (int i = 0; i < cascadeCount; i++)
+        {
+            var (lightView, lightProj) = LightSpaceComputer.Compute(
+                in directional, _camera, _cascadeSplits[i], _cascadeSplits[i + 1]);
+            _cascadeLightViewProjections[i] = lightView * lightProj;
+            uniforms.SetLightViewProj(i, _cascadeLightViewProjections[i]);
+        }
 
         Graphics.SetUniform("shadow", in uniforms);
     }
