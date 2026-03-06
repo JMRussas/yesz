@@ -1,17 +1,20 @@
 //  YesZ - glTF Mesh Extractor
 //
 //  Extracts vertex and index data from a glTF mesh primitive into
-//  MeshVertex3D[] and ushort[] arrays suitable for Mesh3D.Create().
+//  MeshVertex3D[] (or SkinnedMeshVertex3D[]) and ushort[] arrays.
 //
-//  Returns raw arrays (no GPU upload) — Phase 4a is pure data.
-//  Phase 4b's GltfLoader will call Mesh3D.Create() with the results.
+//  Returns raw arrays (no GPU upload) — caller does Mesh3D.Create() or
+//  SkinnedMesh3D.Create() with the results.
 //
 //  Handles missing NORMAL (generates flat normals) and missing TEXCOORD_0
 //  (defaults to zero). Vertex colors default to white.
+//  Skinned path reads JOINTS_0 (ubyte/ushort) and WEIGHTS_0 (float),
+//  normalizing weights to sum to 1.0.
 //
 //  Depends on: YesZ.Gltf (GltfDocument, GltfMeshPrimitive, AccessorReader),
-//              YesZ (MeshVertex3D), NoZ (Color), System.Numerics
-//  Used by:    GltfLoader (Phase 4b), MeshExtractorTests
+//              YesZ (MeshVertex3D, SkinnedMeshVertex3D, JointIndices4),
+//              NoZ (Color), System.Numerics
+//  Used by:    GltfLoader, MeshExtractorTests, SkinDataExtractionTests
 
 using System;
 using System.Numerics;
@@ -23,6 +26,20 @@ namespace YesZ.Gltf;
 /// Result of extracting a mesh primitive: vertices + indices ready for GPU upload.
 /// </summary>
 public readonly record struct ExtractedMesh(MeshVertex3D[] Vertices, ushort[] Indices);
+
+/// <summary>
+/// Result of extracting a skinned mesh primitive: skinned vertices + indices.
+/// </summary>
+public readonly record struct ExtractedSkinnedMesh(SkinnedMeshVertex3D[] Vertices, ushort[] Indices);
+
+/// <summary>
+/// 4× ushort for reading JOINTS_0 with UNSIGNED_SHORT component type.
+/// </summary>
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+internal struct UShort4
+{
+    public ushort X, Y, Z, W;
+}
 
 public static class MeshExtractor
 {
@@ -98,6 +115,124 @@ public static class MeshExtractor
         }
 
         return new ExtractedMesh(vertices, indices);
+    }
+
+    /// <summary>
+    /// Extract skinned vertex and index data from a glTF mesh primitive.
+    /// Reads JOINTS_0 and WEIGHTS_0 in addition to the standard attributes.
+    /// Weights are normalized to sum to 1.0.
+    /// </summary>
+    public static ExtractedSkinnedMesh ExtractSkinnedPrimitive(
+        GltfMeshPrimitive primitive, AccessorReader reader, GltfDocument doc)
+    {
+        // Extract base mesh data using the same logic as unskinned path
+        var baseMesh = ExtractPrimitive(primitive, reader);
+        int vertexCount = baseMesh.Vertices.Length;
+
+        // Read JOINTS_0 — ubyte4 or ushort4, convert to JointIndices4 (byte4)
+        JointIndices4[] joints;
+        if (primitive.Attributes!.TryGetValue("JOINTS_0", out int jointsIdx))
+        {
+            joints = ReadJointIndices(reader, doc, jointsIdx, vertexCount);
+        }
+        else
+        {
+            joints = new JointIndices4[vertexCount]; // All zeros
+        }
+
+        // Read WEIGHTS_0 — float4, normalize to sum = 1.0
+        Vector4[] weights;
+        if (primitive.Attributes.TryGetValue("WEIGHTS_0", out int weightsIdx))
+        {
+            weights = reader.Read<Vector4>(weightsIdx);
+            NormalizeWeights(weights);
+        }
+        else
+        {
+            // Default: all weight on joint 0
+            weights = new Vector4[vertexCount];
+            for (int i = 0; i < vertexCount; i++)
+                weights[i] = new Vector4(1, 0, 0, 0);
+        }
+
+        // Assemble skinned vertices
+        var vertices = new SkinnedMeshVertex3D[vertexCount];
+        for (int i = 0; i < vertexCount; i++)
+        {
+            var bv = baseMesh.Vertices[i];
+            vertices[i] = new SkinnedMeshVertex3D
+            {
+                Position = bv.Position,
+                Normal = bv.Normal,
+                UV = bv.UV,
+                Color = bv.Color,
+                Joints = joints[i],
+                JointWeights = weights[i],
+            };
+        }
+
+        return new ExtractedSkinnedMesh(vertices, baseMesh.Indices);
+    }
+
+    /// <summary>
+    /// Read JOINTS_0 accessor data as JointIndices4[].
+    /// Handles UNSIGNED_BYTE (5121) and UNSIGNED_SHORT (5123) component types.
+    /// </summary>
+    internal static JointIndices4[] ReadJointIndices(
+        AccessorReader reader, GltfDocument doc, int accessorIndex, int expectedCount)
+    {
+        var accessor = doc.Accessors![accessorIndex];
+        return accessor.ComponentType switch
+        {
+            5121 => reader.Read<JointIndices4>(accessorIndex), // UNSIGNED_BYTE — direct 4-byte read
+            5123 => ConvertUShortJoints(reader, accessorIndex),
+            _ => throw new NotSupportedException(
+                $"JOINTS_0 component type {accessor.ComponentType} not supported. " +
+                "Expected UNSIGNED_BYTE (5121) or UNSIGNED_SHORT (5123).")
+        };
+    }
+
+    private static JointIndices4[] ConvertUShortJoints(AccessorReader reader, int accessorIndex)
+    {
+        var ushortJoints = reader.Read<UShort4>(accessorIndex);
+        var result = new JointIndices4[ushortJoints.Length];
+        for (int i = 0; i < ushortJoints.Length; i++)
+        {
+            if (ushortJoints[i].X > 255 || ushortJoints[i].Y > 255 ||
+                ushortJoints[i].Z > 255 || ushortJoints[i].W > 255)
+                throw new InvalidOperationException(
+                    $"Joint index at vertex {i} exceeds 255 (UByte max). " +
+                    "Skeletons with >256 joints are not supported.");
+
+            result[i] = new JointIndices4
+            {
+                Joint0 = (byte)ushortJoints[i].X,
+                Joint1 = (byte)ushortJoints[i].Y,
+                Joint2 = (byte)ushortJoints[i].Z,
+                Joint3 = (byte)ushortJoints[i].W,
+            };
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Normalize joint weights so each vertex's weights sum to 1.0.
+    /// </summary>
+    public static void NormalizeWeights(Vector4[] weights)
+    {
+        for (int i = 0; i < weights.Length; i++)
+        {
+            float sum = weights[i].X + weights[i].Y + weights[i].Z + weights[i].W;
+            if (sum > 1e-6f && MathF.Abs(sum - 1.0f) > 1e-6f)
+            {
+                weights[i] /= sum;
+            }
+            else if (sum <= 1e-6f)
+            {
+                // Zero weights — default to all weight on joint 0
+                weights[i] = new Vector4(1, 0, 0, 0);
+            }
+        }
     }
 
     /// <summary>
