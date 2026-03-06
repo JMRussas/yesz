@@ -114,12 +114,13 @@ public class HelloCubeApp : IApplication
         Graphics3D.Begin(_camera);
 
         // Lighting
-        Graphics3D.SetDirectionalLight(new DirectionalLight
+        var directionalLight = new DirectionalLight
         {
             Direction = Vector3.Normalize(new Vector3(-0.5f, -1.0f, -0.5f)),
             Color = Vector3.One,
             Intensity = 1.5f,
-        });
+        };
+        Graphics3D.SetDirectionalLight(directionalLight);
         Graphics3D.SetAmbientLight(new AmbientLight
         {
             Color = Vector3.One,
@@ -136,9 +137,21 @@ public class HelloCubeApp : IApplication
             Range = 10f,
         });
 
-        // Draw static model on the left
+        // Compute reusable transforms
         var staticWorld = _modelTransform.LocalMatrix
             * Matrix4x4.CreateTranslation(-2f, 0, 0);
+
+        // Shadow pass — renders depth from directional light's perspective
+        Graphics3D.RenderShadowPass(drawMesh =>
+        {
+            // Draw static model into shadow map
+            foreach (var group in _model.MeshGroups)
+                foreach (var prim in group.Primitives)
+                    if (prim.Mesh != null)
+                        drawMesh(prim.Mesh, staticWorld);
+        });
+
+        // Draw static model on the left
         Graphics3D.DrawModel(_model, staticWorld);
 
         // Draw animated skinned model on the right
@@ -164,7 +177,7 @@ public class HelloCubeApp : IApplication
             using (UI.BeginColumn(BoxStyle))
             {
                 UI.Label("YesZ", TitleStyle);
-                UI.Label("Phase 5d - GPU Skinning", SubtitleStyle);
+                UI.Label("Phase 6a - Shadow Infrastructure", SubtitleStyle);
             }
         }
     }

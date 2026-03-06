@@ -38,4 +38,30 @@ public class Camera3D
         );
 
     public Matrix4x4 ViewProjectionMatrix => ViewMatrix * ProjectionMatrix;
+
+    public Vector3[] GetFrustumCorners(float near, float far)
+    {
+        var proj = Matrix4x4.CreatePerspectiveFieldOfView(
+            FieldOfView * MathF.PI / 180.0f, AspectRatio, near, far);
+        var vp = ViewMatrix * proj;
+
+        if (!Matrix4x4.Invert(vp, out var invVP))
+            throw new InvalidOperationException("Cannot invert view-projection matrix");
+
+        // NDC cube corners → world space
+        // WebGPU NDC: x[-1,1], y[-1,1], z[0,1]
+        Span<Vector3> ndcCorners =
+        [
+            new(-1, 1, 0), new(1, 1, 0), new(-1, -1, 0), new(1, -1, 0), // near
+            new(-1, 1, 1), new(1, 1, 1), new(-1, -1, 1), new(1, -1, 1), // far
+        ];
+
+        var corners = new Vector3[8];
+        for (int i = 0; i < 8; i++)
+        {
+            var clip = Vector4.Transform(new Vector4(ndcCorners[i], 1), invVP);
+            corners[i] = new Vector3(clip.X, clip.Y, clip.Z) / clip.W;
+        }
+        return corners;
+    }
 }
