@@ -34,6 +34,7 @@ public static class Graphics3D
     private static Shader? _unlitShader;
     private static Shader? _texturedShader;
     private static Shader? _litShader;
+    private static Shader? _skinnedLitShader;
     private static Camera3D? _camera;
     private static Matrix4x4 _savedProjection;
     private static Matrix4x4 _viewProjection;
@@ -88,6 +89,21 @@ public static class Graphics3D
                 new() { Binding = 2, Type = ShaderBindingType.Texture2D, Name = "base_color_texture" },
                 new() { Binding = 3, Type = ShaderBindingType.Sampler, Name = "base_color_sampler" },
                 new() { Binding = 4, Type = ShaderBindingType.UniformBuffer, Name = "lights" },
+            });
+
+        // Skinned lit shader (skeletal animation + Blinn-Phong)
+        _skinnedLitShader = CreateSkinnedShaderFromEmbedded(
+            "YesZ.Rendering.Shaders.skinned3d.wgsl",
+            "skinned3d",
+            flags,
+            new List<ShaderBinding>
+            {
+                new() { Binding = 0, Type = ShaderBindingType.UniformBuffer, Name = "globals" },
+                new() { Binding = 1, Type = ShaderBindingType.UniformBuffer, Name = "material" },
+                new() { Binding = 2, Type = ShaderBindingType.Texture2D, Name = "base_color_texture" },
+                new() { Binding = 3, Type = ShaderBindingType.Sampler, Name = "base_color_sampler" },
+                new() { Binding = 4, Type = ShaderBindingType.UniformBuffer, Name = "lights" },
+                new() { Binding = 5, Type = ShaderBindingType.UniformBuffer, Name = "joints" },
             });
 
         // Default 1×1 white texture — untextured materials sample this (identity multiply)
@@ -224,12 +240,104 @@ public static class Graphics3D
                 else if (model.Materials.Length > 0)
                     SetMaterial(model.Materials[0]);
 
-                DrawMesh(prim.Mesh, world);
+                if (prim.Mesh != null)
+                    DrawMesh(prim.Mesh, world);
             }
         }
 
         foreach (var child in node.Children)
             DrawNode(child, world, model);
+    }
+
+    /// <summary>
+    /// Draw a skinned mesh with the given joint matrices (from JointMatrixComputer).
+    /// Joint matrices replace the model matrix — the skin matrix handles world placement.
+    /// The current material is used for lighting and texturing.
+    /// </summary>
+    public static void DrawSkinnedMesh(SkinnedMesh3D mesh, ReadOnlySpan<Matrix4x4> jointMatrices)
+    {
+        if (_camera == null || _skinnedLitShader == null) return;
+
+        // Upload light UBO if not done yet
+        if (!_lightsUploadedThisFrame)
+        {
+            UploadLightUniforms();
+            _lightsUploadedThisFrame = true;
+        }
+
+        // VP in globals (same as lit path)
+        Graphics.SetPassProjection(Matrix4x4.Transpose(_viewProjection));
+
+        // Material UBO — model/normal matrix set to identity since joint matrices
+        // absorb the full world transform (glTF spec: skinned mesh node transform is ignored)
+        var uniforms = new LitMaterialUniforms
+        {
+            Model = Matrix4x4.Identity,
+            NormalMatrix = Matrix4x4.Identity,
+            BaseColorFactor = _currentMaterial?.BaseColorFactor ?? new Vector4(1, 1, 1, 1),
+            Metallic = _currentMaterial?.Metallic ?? 0,
+            Roughness = _currentMaterial?.Roughness ?? 0.5f,
+        };
+        Graphics.SetUniform("material", in uniforms);
+
+        // Joint matrix UBO
+        var jointUniforms = new JointMatrixUniforms();
+        int count = Math.Min(jointMatrices.Length, JointMatrixUniforms.MaxJoints);
+        for (int i = 0; i < count; i++)
+            jointUniforms.Set(i, in jointMatrices[i]);
+        Graphics.SetUniform("joints", in jointUniforms);
+
+        // Shader, texture, mesh, draw
+        Graphics.SetShader(_skinnedLitShader);
+        var texture = _currentMaterial?.BaseColorTexture ?? _defaultWhiteTexture;
+        Graphics.SetTexture(texture, 0, TextureFilter.Linear);
+        Graphics.SetMesh(mesh.RenderMesh);
+        Graphics.DrawElements(mesh.IndexCount, 0);
+    }
+
+    /// <summary>
+    /// Draw all meshes in a model with skeletal animation.
+    /// Computes joint matrices from the animation player state and renders skinned meshes.
+    /// Non-skinned primitives are rendered with the given world transform.
+    /// </summary>
+    public static void DrawAnimatedModel(
+        Model3D model, Matrix4x4 worldMatrix, ReadOnlySpan<Matrix4x4> jointMatrices)
+    {
+        var savedMaterial = _currentMaterial;
+        DrawNodeAnimated(model.Root, worldMatrix, model, jointMatrices);
+        _currentMaterial = savedMaterial;
+    }
+
+    private static void DrawNodeAnimated(
+        ModelNode node, Matrix4x4 parentWorld, Model3D model, ReadOnlySpan<Matrix4x4> jointMatrices)
+    {
+        var world = node.LocalTransform * parentWorld;
+
+        if (node.MeshGroupIndex >= 0 && node.MeshGroupIndex < model.MeshGroups.Length)
+        {
+            var group = model.MeshGroups[node.MeshGroupIndex];
+            foreach (var prim in group.Primitives)
+            {
+                int matIdx = prim.MaterialIndex;
+                if (matIdx >= 0 && matIdx < model.Materials.Length)
+                    SetMaterial(model.Materials[matIdx]);
+                else if (model.Materials.Length > 0)
+                    SetMaterial(model.Materials[0]);
+
+                if (prim.SkinnedMesh != null && jointMatrices.Length > 0)
+                {
+                    // Skinned: joint matrices handle world placement
+                    DrawSkinnedMesh(prim.SkinnedMesh, jointMatrices);
+                }
+                else if (prim.Mesh != null)
+                {
+                    DrawMesh(prim.Mesh, world);
+                }
+            }
+        }
+
+        foreach (var child in node.Children)
+            DrawNodeAnimated(child, world, model, jointMatrices);
     }
 
     /// <summary>
@@ -365,6 +473,26 @@ public static class Graphics3D
         try
         {
             return Shader.CreateRaw(shaderName, handle, flags, bindings, MeshVertex3D.VertexHash);
+        }
+        catch
+        {
+            Graphics.Driver.DestroyShader(handle);
+            throw;
+        }
+    }
+
+    private static Shader CreateSkinnedShaderFromEmbedded(
+        string resourceName,
+        string shaderName,
+        ShaderFlags flags,
+        List<ShaderBinding> bindings)
+    {
+        var wgslSource = LoadEmbeddedResource(resourceName);
+        var handle = Graphics.Driver.CreateShader(shaderName, wgslSource, wgslSource, bindings);
+
+        try
+        {
+            return Shader.CreateRaw(shaderName, handle, flags, bindings, SkinnedMeshVertex3D.VertexHash);
         }
         catch
         {

@@ -22,6 +22,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Assets\BoxTextured.glb" />
+    <EmbeddedResource Include="Assets\RiggedSimple.glb" />
   </ItemGroup>
 
 </Project>

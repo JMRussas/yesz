@@ -4,15 +4,20 @@
 //  textures, and node hierarchy. Requires Graphics3D to be initialized
 //  before calling Load().
 //
+//  Supports both static and skinned models. When a skin is present, extracts
+//  SkinnedMeshVertex3D data, parses skeleton + animations, and computes bind pose.
+//
 //  Texture resolution: material → texture → image → bufferView → BIN chunk
 //  → StbImageSharp decode → Graphics.Driver.CreateTexture().
 //
 //  Node hierarchy: resolves default scene → root nodes → recursive children,
 //  composing TRS/matrix transforms per node via NodeTransformResolver.
 //
-//  Depends on: YesZ.Gltf (GlbReader, GltfDocument, AccessorReader, MeshExtractor, NodeTransformResolver),
+//  Depends on: YesZ.Gltf (GlbReader, GltfDocument, AccessorReader, MeshExtractor,
+//              NodeTransformResolver, SkeletonParser, AnimationParser),
 //              YesZ.Rendering (Model3D, MeshGroup, ModelNode, Material3D, Graphics3D),
-//              YesZ (Mesh3D), NoZ (Graphics, TextureFilter), StbImageSharp
+//              YesZ (Mesh3D, SkinnedMesh3D, Skeleton3D, AnimationClip3D),
+//              NoZ (Graphics, TextureFilter), StbImageSharp
 //  Used by:    Game code, samples
 
 using System;
@@ -29,6 +34,7 @@ public static class GltfLoader
     /// <summary>
     /// Load a .glb file from raw bytes into a GPU-ready Model3D.
     /// Graphics3D must be initialized before calling this.
+    /// Automatically detects skinned models and loads skeleton + animations.
     /// </summary>
     public static Model3D Load(byte[] glbData)
     {
@@ -42,8 +48,25 @@ public static class GltfLoader
         // Load materials
         var materials = LoadMaterials(doc, textures);
 
-        // Build mesh groups (all primitives per mesh)
-        var meshGroups = BuildMeshGroups(doc, reader, materials);
+        // Detect skin: find the first skin referenced by any node
+        int skinIndex = FindFirstSkin(doc);
+
+        Skeleton3D? skeleton = null;
+        AnimationClip3D[]? animations = null;
+        Matrix4x4[]? bindPose = null;
+
+        if (skinIndex >= 0 && doc.Skins != null)
+        {
+            var skin = doc.Skins[skinIndex];
+            skeleton = SkeletonParser.Parse(skin, doc, reader);
+            animations = AnimationParser.ParseAll(doc, reader, skeleton);
+            bindPose = ComputeBindPose(doc, skeleton);
+        }
+
+        // Build mesh groups — skinned if skeleton present
+        var meshGroups = skeleton != null
+            ? BuildMeshGroupsSkinned(doc, reader, materials, skeleton)
+            : BuildMeshGroups(doc, reader, materials);
 
         // Build node hierarchy from default scene
         var root = BuildNodeHierarchy(doc, meshGroups.Length);
@@ -52,7 +75,8 @@ public static class GltfLoader
         var ownedTextures = new nuint[textures.Count];
         textures.Values.CopyTo(ownedTextures, 0);
 
-        return new Model3D(root, meshGroups, materials, ownedTextures);
+        return new Model3D(root, meshGroups, materials, ownedTextures,
+            skeleton, animations, bindPose);
     }
 
     /// <summary>
@@ -102,6 +126,109 @@ public static class GltfLoader
         }
 
         return groups;
+    }
+
+    /// <summary>
+    /// Find the first skin index referenced by any node in the document.
+    /// Returns -1 if no skin is found.
+    /// </summary>
+    private static int FindFirstSkin(GltfDocument doc)
+    {
+        if (doc.Nodes == null || doc.Skins == null || doc.Skins.Length == 0)
+            return -1;
+
+        foreach (var node in doc.Nodes)
+        {
+            if (node.Skin.HasValue && node.Skin.Value >= 0 && node.Skin.Value < doc.Skins.Length)
+                return node.Skin.Value;
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// Build mesh groups with skinned primitives for nodes that reference a skin.
+    /// Meshes on nodes with a skin get SkinnedMeshVertex3D; others get MeshVertex3D.
+    /// </summary>
+    private static MeshGroup[] BuildMeshGroupsSkinned(
+        GltfDocument doc, AccessorReader reader, Material3D[] materials, Skeleton3D skeleton)
+    {
+        if (doc.Meshes == null || doc.Meshes.Length == 0)
+            return [];
+
+        // Determine which mesh indices are used by skinned nodes
+        var skinnedMeshIndices = new HashSet<int>();
+        if (doc.Nodes != null)
+        {
+            foreach (var node in doc.Nodes)
+            {
+                if (node.Skin.HasValue && node.Mesh.HasValue)
+                    skinnedMeshIndices.Add(node.Mesh.Value);
+            }
+        }
+
+        int defaultMaterialIdx = materials.Length - 1;
+        var groups = new MeshGroup[doc.Meshes.Length];
+
+        for (int m = 0; m < doc.Meshes.Length; m++)
+        {
+            var gltfMesh = doc.Meshes[m];
+            if (gltfMesh.Primitives == null || gltfMesh.Primitives.Length == 0)
+            {
+                groups[m] = new MeshGroup([]);
+                continue;
+            }
+
+            bool isSkinned = skinnedMeshIndices.Contains(m);
+            var primitives = new ModelMesh[gltfMesh.Primitives.Length];
+
+            for (int p = 0; p < gltfMesh.Primitives.Length; p++)
+            {
+                var prim = gltfMesh.Primitives[p];
+                int materialIdx = prim.Material ?? defaultMaterialIdx;
+                if (materialIdx < 0 || materialIdx >= materials.Length)
+                    materialIdx = defaultMaterialIdx;
+
+                if (isSkinned)
+                {
+                    var extracted = MeshExtractor.ExtractSkinnedPrimitive(prim, reader, doc);
+                    var mesh = SkinnedMesh3D.Create(extracted.Vertices, extracted.Indices, skeleton);
+                    primitives[p] = new ModelMesh(mesh, materialIdx);
+                }
+                else
+                {
+                    var extracted = MeshExtractor.ExtractPrimitive(prim, reader);
+                    var mesh = Mesh3D.Create(extracted.Vertices, extracted.Indices);
+                    primitives[p] = new ModelMesh(mesh, materialIdx);
+                }
+            }
+
+            groups[m] = new MeshGroup(primitives);
+        }
+
+        return groups;
+    }
+
+    /// <summary>
+    /// Compute bind pose: per-joint local transforms from glTF node TRS.
+    /// These are the default poses for joints that aren't animated.
+    /// </summary>
+    private static Matrix4x4[] ComputeBindPose(GltfDocument doc, Skeleton3D skeleton)
+    {
+        var bindPose = new Matrix4x4[skeleton.JointCount];
+        for (int j = 0; j < skeleton.JointCount; j++)
+        {
+            int nodeIdx = skeleton.JointNodeIndices[j];
+            if (doc.Nodes != null && nodeIdx >= 0 && nodeIdx < doc.Nodes.Length)
+            {
+                bindPose[j] = NodeTransformResolver.ResolveLocalTransform(doc.Nodes[nodeIdx]);
+            }
+            else
+            {
+                bindPose[j] = Matrix4x4.Identity;
+            }
+        }
+        return bindPose;
     }
 
     private static ModelNode BuildNodeHierarchy(GltfDocument doc, int meshGroupCount)

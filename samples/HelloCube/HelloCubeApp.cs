@@ -1,9 +1,10 @@
 //  YesZ - HelloCube Application
 //
-//  Renders a spinning glTF model (BoxTextured) with directional, ambient,
-//  and point lighting. Demonstrates glTF loading and multi-light rendering.
+//  Renders a spinning glTF model (BoxTextured) with lighting, and an animated
+//  skinned model (RiggedSimple) demonstrating skeletal animation.
 //
-//  Depends on: YesZ.Core (Camera3D, Transform3D, DirectionalLight, AmbientLight, PointLight),
+//  Depends on: YesZ.Core (Camera3D, Transform3D, DirectionalLight, AmbientLight, PointLight,
+//              AnimationPlayer3D, JointMatrixComputer),
 //              YesZ.Rendering (Graphics3D, GltfLoader, Model3D), NoZ (IApplication, Graphics, UI, Color, Time)
 //  Used by:    Program.cs
 
@@ -20,8 +21,10 @@ public class HelloCubeApp : IApplication
 {
     private Camera3D? _camera;
     private Model3D? _model;
+    private Model3D? _skinnedModel;
     private Transform3D _modelTransform;
     private float _rotationAngle;
+    private AnimationPlayer3D? _animPlayer;
 
     private static readonly ContainerStyle RootStyle = new()
     {
@@ -55,10 +58,10 @@ public class HelloCubeApp : IApplication
 
     public void LoadAssets()
     {
-        // Set up camera
+        // Set up camera — pulled back to see both models
         _camera = new Camera3D
         {
-            Position = new Vector3(0, 0.8f, 4.5f),
+            Position = new Vector3(0, 1.5f, 6f),
             FieldOfView = 50f,
         };
 
@@ -67,10 +70,22 @@ public class HelloCubeApp : IApplication
         // Initialize 3D rendering system
         Graphics3D.Initialize();
 
-        // Load glTF model from embedded resource
-        _model = GltfLoader.LoadFromEmbeddedResource(
-            Assembly.GetExecutingAssembly(),
+        var assembly = Assembly.GetExecutingAssembly();
+
+        // Load static glTF model
+        _model = GltfLoader.LoadFromEmbeddedResource(assembly,
             "YesZ.Samples.HelloCube.Assets.BoxTextured.glb");
+
+        // Load skinned glTF model
+        _skinnedModel = GltfLoader.LoadFromEmbeddedResource(assembly,
+            "YesZ.Samples.HelloCube.Assets.RiggedSimple.glb");
+
+        // Set up animation player if model has animations
+        if (_skinnedModel.Animations is { Length: > 0 })
+        {
+            _animPlayer = new AnimationPlayer3D();
+            _animPlayer.Play(_skinnedModel.Animations[0]);
+        }
     }
 
     public void Update()
@@ -84,14 +99,17 @@ public class HelloCubeApp : IApplication
         if (size.X > 0 && size.Y > 0)
             _camera.AspectRatio = (float)size.X / size.Y;
 
-        // Spin the model
+        // Spin the static model
         _rotationAngle += Time.DeltaTime * 1.2f;
         _modelTransform.Rotation = Quaternion.CreateFromYawPitchRoll(_rotationAngle, _rotationAngle * 0.7f, 0);
+
+        // Update animation
+        _animPlayer?.Update(Time.DeltaTime);
 
         // 3D rendering pass
         Graphics3D.Begin(_camera);
 
-        // Lighting — directional from upper-left-front, soft ambient fill
+        // Lighting
         Graphics3D.SetDirectionalLight(new DirectionalLight
         {
             Direction = Vector3.Normalize(new Vector3(-0.5f, -1.0f, -0.5f)),
@@ -104,17 +122,36 @@ public class HelloCubeApp : IApplication
             Intensity = 0.15f,
         });
 
-        // Point light — orbits the model to show position-based attenuation
+        // Point light orbiting both models
         float orbitAngle = _rotationAngle * 0.8f;
         Graphics3D.AddPointLight(new PointLight
         {
-            Position = new Vector3(MathF.Cos(orbitAngle) * 3f, 1.5f, MathF.Sin(orbitAngle) * 3f),
+            Position = new Vector3(MathF.Cos(orbitAngle) * 4f, 2f, MathF.Sin(orbitAngle) * 4f),
             Color = new Vector3(0.3f, 0.6f, 1.0f),
             Intensity = 2.5f,
-            Range = 8f,
+            Range = 10f,
         });
 
-        Graphics3D.DrawModel(_model, _modelTransform.LocalMatrix);
+        // Draw static model on the left
+        var staticWorld = _modelTransform.LocalMatrix
+            * Matrix4x4.CreateTranslation(-2f, 0, 0);
+        Graphics3D.DrawModel(_model, staticWorld);
+
+        // Draw animated skinned model on the right
+        if (_skinnedModel != null && _skinnedModel.Skeleton != null
+            && _animPlayer != null && _skinnedModel.BindPose != null)
+        {
+            var skeleton = _skinnedModel.Skeleton;
+            var localPoses = new Matrix4x4[skeleton.JointCount];
+            _animPlayer.Sample(skeleton, _skinnedModel.BindPose, localPoses);
+
+            var jointMatrices = new Matrix4x4[skeleton.JointCount];
+            JointMatrixComputer.Compute(skeleton, localPoses, jointMatrices);
+
+            var skinnedWorld = Matrix4x4.CreateTranslation(2f, 0, 0);
+            Graphics3D.DrawAnimatedModel(_skinnedModel, skinnedWorld, jointMatrices);
+        }
+
         Graphics3D.End();
     }
 
@@ -125,7 +162,7 @@ public class HelloCubeApp : IApplication
             using (UI.BeginColumn(BoxStyle))
             {
                 UI.Label("YesZ", TitleStyle);
-                UI.Label("Phase 4c - Node Hierarchy", SubtitleStyle);
+                UI.Label("Phase 5d - GPU Skinning", SubtitleStyle);
             }
         }
     }
