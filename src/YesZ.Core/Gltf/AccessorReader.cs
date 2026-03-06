@@ -42,6 +42,12 @@ public class AccessorReader
         int stride = view.ByteStride ?? elementSize;
         int count = accessor.Count;
 
+        int lastByteNeeded = startOffset + (count - 1) * stride + elementSize;
+        if (count > 0 && lastByteNeeded > _binChunk.Length)
+            throw new InvalidOperationException(
+                $"Accessor {accessorIndex} reads past end of BIN chunk " +
+                $"(needs byte {lastByteNeeded}, chunk is {_binChunk.Length} bytes).");
+
         var result = new T[count];
 
         if (stride == elementSize)
@@ -74,7 +80,7 @@ public class AccessorReader
 
         return accessor.ComponentType switch
         {
-            5121 => ReadByteIndices(accessor),    // UNSIGNED_BYTE
+            5121 => ReadByteIndices(accessorIndex),    // UNSIGNED_BYTE
             5123 => Read<ushort>(accessorIndex),  // UNSIGNED_SHORT
             5125 => ReadUintIndices(accessor, accessorIndex), // UNSIGNED_INT
             _ => throw new InvalidOperationException(
@@ -82,16 +88,12 @@ public class AccessorReader
         };
     }
 
-    private ushort[] ReadByteIndices(GltfAccessor accessor)
+    private ushort[] ReadByteIndices(int accessorIndex)
     {
-        var view = GetBufferView(accessor.BufferView!.Value);
-        int startOffset = (view.ByteOffset ?? 0) + (accessor.ByteOffset ?? 0);
-
-        var result = new ushort[accessor.Count];
-        for (int i = 0; i < accessor.Count; i++)
-        {
-            result[i] = _binChunk[startOffset + i];
-        }
+        var bytes = Read<byte>(accessorIndex);
+        var result = new ushort[bytes.Length];
+        for (int i = 0; i < bytes.Length; i++)
+            result[i] = bytes[i];
         return result;
     }
 

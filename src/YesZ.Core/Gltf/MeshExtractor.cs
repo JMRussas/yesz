@@ -34,6 +34,12 @@ public static class MeshExtractor
         if (primitive.Attributes == null)
             throw new InvalidOperationException("Mesh primitive has no attributes.");
 
+        // Only TRIANGLES (mode 4, or default when omitted) is supported
+        int mode = primitive.Mode ?? 4;
+        if (mode != 4)
+            throw new NotSupportedException(
+                $"Primitive mode {mode} is not supported. Only TRIANGLES (4) is supported.");
+
         if (!primitive.Attributes.TryGetValue("POSITION", out int posIdx))
             throw new InvalidOperationException("Mesh primitive has no POSITION attribute.");
 
@@ -47,6 +53,10 @@ public static class MeshExtractor
         }
         else
         {
+            if (positions.Length > ushort.MaxValue)
+                throw new InvalidOperationException(
+                    $"Non-indexed primitive has {positions.Length} vertices, exceeding ushort.MaxValue (65535).");
+
             indices = new ushort[positions.Length];
             for (int i = 0; i < positions.Length; i++)
                 indices[i] = (ushort)i;
@@ -91,8 +101,9 @@ public static class MeshExtractor
     }
 
     /// <summary>
-    /// Generate flat normals from triangle vertex positions and indices.
-    /// Each triangle's vertices get the same face normal (cross product of two edges).
+    /// Generate normals from triangle vertex positions and indices.
+    /// Accumulates face normals at shared vertices and normalizes, producing
+    /// smooth normals. For non-shared vertices this is equivalent to flat normals.
     /// </summary>
     public static Vector3[] GenerateFlatNormals(Vector3[] positions, ushort[] indices)
     {
@@ -106,15 +117,25 @@ public static class MeshExtractor
 
             var edge1 = p1 - p0;
             var edge2 = p2 - p0;
-            var faceNormal = Vector3.Normalize(Vector3.Cross(edge1, edge2));
+            var faceNormal = Vector3.Cross(edge1, edge2);
 
-            // If degenerate triangle, use up vector as fallback
-            if (float.IsNaN(faceNormal.X))
-                faceNormal = Vector3.UnitY;
+            // Skip degenerate triangles (zero-area → zero cross product)
+            if (faceNormal.LengthSquared() < 1e-12f)
+                continue;
 
-            normals[indices[i]] = faceNormal;
-            normals[indices[i + 1]] = faceNormal;
-            normals[indices[i + 2]] = faceNormal;
+            // Accumulate (unnormalized) face normal at each vertex
+            normals[indices[i]] += faceNormal;
+            normals[indices[i + 1]] += faceNormal;
+            normals[indices[i + 2]] += faceNormal;
+        }
+
+        // Normalize accumulated normals; fallback to up vector for degenerate vertices
+        for (int i = 0; i < normals.Length; i++)
+        {
+            if (normals[i].LengthSquared() < 1e-12f)
+                normals[i] = Vector3.UnitY;
+            else
+                normals[i] = Vector3.Normalize(normals[i]);
         }
 
         return normals;
