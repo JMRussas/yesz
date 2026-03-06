@@ -25,6 +25,8 @@ public class HelloCubeApp : IApplication
     private Transform3D _modelTransform;
     private float _rotationAngle;
     private AnimationPlayer3D? _animPlayer;
+    private Matrix4x4[]? _localPoses;
+    private Matrix4x4[]? _jointMatrices;
 
     private static readonly ContainerStyle RootStyle = new()
     {
@@ -81,10 +83,12 @@ public class HelloCubeApp : IApplication
             "YesZ.Samples.HelloCube.Assets.RiggedSimple.glb");
 
         // Set up animation player if model has animations
-        if (_skinnedModel.Animations is { Length: > 0 })
+        if (_skinnedModel.Skeleton != null && _skinnedModel.Animations is { Length: > 0 })
         {
             _animPlayer = new AnimationPlayer3D();
             _animPlayer.Play(_skinnedModel.Animations[0]);
+            _localPoses = new Matrix4x4[_skinnedModel.Skeleton.JointCount];
+            _jointMatrices = new Matrix4x4[_skinnedModel.Skeleton.JointCount];
         }
     }
 
@@ -139,17 +143,15 @@ public class HelloCubeApp : IApplication
 
         // Draw animated skinned model on the right
         if (_skinnedModel != null && _skinnedModel.Skeleton != null
-            && _animPlayer != null && _skinnedModel.BindPose != null)
+            && _animPlayer != null && _skinnedModel.BindPose != null
+            && _localPoses != null && _jointMatrices != null)
         {
             var skeleton = _skinnedModel.Skeleton;
-            var localPoses = new Matrix4x4[skeleton.JointCount];
-            _animPlayer.Sample(skeleton, _skinnedModel.BindPose, localPoses);
-
-            var jointMatrices = new Matrix4x4[skeleton.JointCount];
-            JointMatrixComputer.Compute(skeleton, localPoses, jointMatrices);
+            _animPlayer.Sample(skeleton, _skinnedModel.BindPose, _localPoses);
+            JointMatrixComputer.Compute(skeleton, _localPoses, _jointMatrices);
 
             var skinnedWorld = Matrix4x4.CreateTranslation(2f, 0, 0);
-            Graphics3D.DrawAnimatedModel(_skinnedModel, skinnedWorld, jointMatrices);
+            Graphics3D.DrawAnimatedModel(_skinnedModel, skinnedWorld, _jointMatrices);
         }
 
         Graphics3D.End();
