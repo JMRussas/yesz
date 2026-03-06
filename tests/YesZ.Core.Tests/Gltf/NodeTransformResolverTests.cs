@@ -62,15 +62,16 @@ public class NodeTransformResolverTests
     }
 
     [Fact]
-    public void ResolveLocal_ColumnMajorMatrix_TransposedCorrectly()
+    public void ResolveLocal_ColumnMajorMatrix_LoadedCorrectly()
     {
-        // Column-major: col0=(1,0,0,0), col1=(0,1,0,0), col2=(0,0,1,0), col3=(5,6,7,1)
-        // This is a translation matrix T(5,6,7) in column-major storage
+        // Use a scale(2,1,1) + translation(5,6,7) matrix — asymmetric, so
+        // sequential vs transposed loading produces different results.
+        // Column-major layout: col0=(2,0,0,0), col1=(0,1,0,0), col2=(0,0,1,0), col3=(5,6,7,1)
         var node = new GltfNode
         {
             Matrix =
             [
-                1, 0, 0, 0,  // col 0
+                2, 0, 0, 0,  // col 0
                 0, 1, 0, 0,  // col 1
                 0, 0, 1, 0,  // col 2
                 5, 6, 7, 1,  // col 3
@@ -79,8 +80,15 @@ public class NodeTransformResolverTests
 
         var result = NodeTransformResolver.ResolveLocalTransform(node);
 
-        var expected = Matrix4x4.CreateTranslation(5, 6, 7);
+        // In row-vector System.Numerics: S * T = CreateScale(2,1,1) * CreateTranslation(5,6,7)
+        var expected = Matrix4x4.CreateScale(2, 1, 1) * Matrix4x4.CreateTranslation(5, 6, 7);
         AssertMatrixEqual(expected, result);
+
+        // Verify asymmetric element: M11=2 (scale X), M41=5 (translation X)
+        Assert.InRange(result.M11, 2 - Epsilon, 2 + Epsilon);
+        Assert.InRange(result.M41, 5 - Epsilon, 5 + Epsilon);
+        // If incorrectly transposed, M11 would be 2 but M14 would be 5 (wrong)
+        Assert.InRange(result.M14, -Epsilon, Epsilon);
     }
 
     [Fact]

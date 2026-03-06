@@ -120,20 +120,27 @@ public static class GltfLoader
             rootIndices = [];
         }
 
+        // Track visited nodes to detect cycles (malformed glTF)
+        var visited = new HashSet<int>();
+
         // Build child nodes recursively
         var children = new ModelNode[rootIndices.Length];
         for (int i = 0; i < rootIndices.Length; i++)
         {
-            children[i] = BuildNode(doc, rootIndices[i], meshGroupCount);
+            children[i] = BuildNode(doc, rootIndices[i], meshGroupCount, visited);
         }
 
         // Synthetic root node (identity transform, no mesh, scene root nodes as children)
         return new ModelNode(Matrix4x4.Identity, -1, children);
     }
 
-    private static ModelNode BuildNode(GltfDocument doc, int nodeIndex, int meshGroupCount)
+    private static ModelNode BuildNode(GltfDocument doc, int nodeIndex, int meshGroupCount, HashSet<int> visited)
     {
         if (doc.Nodes == null || nodeIndex < 0 || nodeIndex >= doc.Nodes.Length)
+            return new ModelNode(Matrix4x4.Identity, -1, []);
+
+        // Cycle detection: skip nodes already in the current traversal path
+        if (!visited.Add(nodeIndex))
             return new ModelNode(Matrix4x4.Identity, -1, []);
 
         var gltfNode = doc.Nodes[nodeIndex];
@@ -150,7 +157,7 @@ public static class GltfLoader
             children = new ModelNode[gltfNode.Children.Length];
             for (int i = 0; i < gltfNode.Children.Length; i++)
             {
-                children[i] = BuildNode(doc, gltfNode.Children[i], meshGroupCount);
+                children[i] = BuildNode(doc, gltfNode.Children[i], meshGroupCount, visited);
             }
         }
         else
