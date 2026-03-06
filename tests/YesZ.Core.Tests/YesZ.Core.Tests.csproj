@@ -22,4 +22,9 @@
     <ProjectReference Include="..\..\src\YesZ.Core\YesZ.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="TestData\Box.glb" />
+    <EmbeddedResource Include="TestData\BoxTextured.glb" />
+  </ItemGroup>
+
 </Project>
