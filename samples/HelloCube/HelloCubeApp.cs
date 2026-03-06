@@ -125,7 +125,7 @@ public class HelloCubeApp : IApplication
             using (UI.BeginColumn(BoxStyle))
             {
                 UI.Label("YesZ", TitleStyle);
-                UI.Label("Phase 4b - Model Loading", SubtitleStyle);
+                UI.Label("Phase 4c - Node Hierarchy", SubtitleStyle);
             }
         }
     }

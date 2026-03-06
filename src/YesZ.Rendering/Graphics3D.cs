@@ -200,24 +200,36 @@ public static class Graphics3D
 
     /// <summary>
     /// Draw all meshes in a model with the given root world transform.
-    /// Sets each mesh's material before drawing.
+    /// Recursively traverses the node hierarchy, composing transforms.
     /// </summary>
     public static void DrawModel(Model3D model, Matrix4x4 worldMatrix)
     {
         var savedMaterial = _currentMaterial;
+        DrawNode(model.Root, worldMatrix, model);
+        _currentMaterial = savedMaterial;
+    }
 
-        foreach (var entry in model.Meshes)
+    private static void DrawNode(ModelNode node, Matrix4x4 parentWorld, Model3D model)
+    {
+        var world = node.LocalTransform * parentWorld;
+
+        if (node.MeshGroupIndex >= 0 && node.MeshGroupIndex < model.MeshGroups.Length)
         {
-            int matIdx = entry.MaterialIndex;
-            if (matIdx >= 0 && matIdx < model.Materials.Length)
-                SetMaterial(model.Materials[matIdx]);
-            else if (model.Materials.Length > 0)
-                SetMaterial(model.Materials[0]);
+            var group = model.MeshGroups[node.MeshGroupIndex];
+            foreach (var prim in group.Primitives)
+            {
+                int matIdx = prim.MaterialIndex;
+                if (matIdx >= 0 && matIdx < model.Materials.Length)
+                    SetMaterial(model.Materials[matIdx]);
+                else if (model.Materials.Length > 0)
+                    SetMaterial(model.Materials[0]);
 
-            DrawMesh(entry.Mesh, worldMatrix);
+                DrawMesh(prim.Mesh, world);
+            }
         }
 
-        _currentMaterial = savedMaterial;
+        foreach (var child in node.Children)
+            DrawNode(child, world, model);
     }
 
     /// <summary>

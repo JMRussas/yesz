@@ -1,13 +1,17 @@
 //  YesZ - glTF Model Loader
 //
 //  High-level API: .glb bytes → Model3D with GPU-ready meshes, materials,
-//  and textures. Requires Graphics3D to be initialized before calling Load().
+//  textures, and node hierarchy. Requires Graphics3D to be initialized
+//  before calling Load().
 //
 //  Texture resolution: material → texture → image → bufferView → BIN chunk
 //  → StbImageSharp decode → Graphics.Driver.CreateTexture().
 //
-//  Depends on: YesZ.Gltf (GlbReader, GltfDocument, AccessorReader, MeshExtractor),
-//              YesZ.Rendering (Model3D, Material3D, TextureLoader, Graphics3D),
+//  Node hierarchy: resolves default scene → root nodes → recursive children,
+//  composing TRS/matrix transforms per node via NodeTransformResolver.
+//
+//  Depends on: YesZ.Gltf (GlbReader, GltfDocument, AccessorReader, MeshExtractor, NodeTransformResolver),
+//              YesZ.Rendering (Model3D, MeshGroup, ModelNode, Material3D, Graphics3D),
 //              YesZ (Mesh3D), NoZ (Graphics, TextureFilter), StbImageSharp
 //  Used by:    Game code, samples
 
@@ -38,30 +42,17 @@ public static class GltfLoader
         // Load materials
         var materials = LoadMaterials(doc, textures);
 
-        // Extract meshes (first primitive per mesh for Phase 4b)
-        var meshEntries = new List<ModelMesh>();
-        if (doc.Meshes != null)
-        {
-            foreach (var gltfMesh in doc.Meshes)
-            {
-                if (gltfMesh.Primitives == null || gltfMesh.Primitives.Length == 0)
-                    continue;
+        // Build mesh groups (all primitives per mesh)
+        var meshGroups = BuildMeshGroups(doc, reader, materials);
 
-                var prim = gltfMesh.Primitives[0];
-                var extracted = MeshExtractor.ExtractPrimitive(prim, reader);
-                var mesh = Mesh3D.Create(extracted.Vertices, extracted.Indices);
-                int materialIdx = prim.Material ?? (materials.Length - 1);
-                if (materialIdx < 0 || materialIdx >= materials.Length)
-                    materialIdx = materials.Length - 1;
-                meshEntries.Add(new ModelMesh(mesh, materialIdx));
-            }
-        }
+        // Build node hierarchy from default scene
+        var root = BuildNodeHierarchy(doc, meshGroups.Length);
 
         // Collect owned texture handles for disposal
         var ownedTextures = new nuint[textures.Count];
         textures.Values.CopyTo(ownedTextures, 0);
 
-        return new Model3D(meshEntries.ToArray(), materials, ownedTextures);
+        return new Model3D(root, meshGroups, materials, ownedTextures);
     }
 
     /// <summary>
@@ -74,6 +65,100 @@ public static class GltfLoader
         using var ms = new MemoryStream();
         stream.CopyTo(ms);
         return Load(ms.ToArray());
+    }
+
+    private static MeshGroup[] BuildMeshGroups(GltfDocument doc, AccessorReader reader, Material3D[] materials)
+    {
+        if (doc.Meshes == null || doc.Meshes.Length == 0)
+            return [];
+
+        int defaultMaterialIdx = materials.Length - 1;
+        var groups = new MeshGroup[doc.Meshes.Length];
+
+        for (int m = 0; m < doc.Meshes.Length; m++)
+        {
+            var gltfMesh = doc.Meshes[m];
+            if (gltfMesh.Primitives == null || gltfMesh.Primitives.Length == 0)
+            {
+                groups[m] = new MeshGroup([]);
+                continue;
+            }
+
+            var primitives = new ModelMesh[gltfMesh.Primitives.Length];
+            for (int p = 0; p < gltfMesh.Primitives.Length; p++)
+            {
+                var prim = gltfMesh.Primitives[p];
+                var extracted = MeshExtractor.ExtractPrimitive(prim, reader);
+                var mesh = Mesh3D.Create(extracted.Vertices, extracted.Indices);
+
+                int materialIdx = prim.Material ?? defaultMaterialIdx;
+                if (materialIdx < 0 || materialIdx >= materials.Length)
+                    materialIdx = defaultMaterialIdx;
+
+                primitives[p] = new ModelMesh(mesh, materialIdx);
+            }
+
+            groups[m] = new MeshGroup(primitives);
+        }
+
+        return groups;
+    }
+
+    private static ModelNode BuildNodeHierarchy(GltfDocument doc, int meshGroupCount)
+    {
+        // Determine root node indices from default scene
+        int[] rootIndices;
+        if (doc.Scenes != null && doc.Scenes.Length > 0)
+        {
+            int sceneIdx = doc.Scene ?? 0;
+            if (sceneIdx < 0 || sceneIdx >= doc.Scenes.Length)
+                sceneIdx = 0;
+            rootIndices = doc.Scenes[sceneIdx].Nodes ?? [];
+        }
+        else
+        {
+            rootIndices = [];
+        }
+
+        // Build child nodes recursively
+        var children = new ModelNode[rootIndices.Length];
+        for (int i = 0; i < rootIndices.Length; i++)
+        {
+            children[i] = BuildNode(doc, rootIndices[i], meshGroupCount);
+        }
+
+        // Synthetic root node (identity transform, no mesh, scene root nodes as children)
+        return new ModelNode(Matrix4x4.Identity, -1, children);
+    }
+
+    private static ModelNode BuildNode(GltfDocument doc, int nodeIndex, int meshGroupCount)
+    {
+        if (doc.Nodes == null || nodeIndex < 0 || nodeIndex >= doc.Nodes.Length)
+            return new ModelNode(Matrix4x4.Identity, -1, []);
+
+        var gltfNode = doc.Nodes[nodeIndex];
+        var localTransform = NodeTransformResolver.ResolveLocalTransform(gltfNode);
+
+        int meshGroupIdx = gltfNode.Mesh ?? -1;
+        if (meshGroupIdx >= meshGroupCount)
+            meshGroupIdx = -1;
+
+        // Recurse children
+        ModelNode[] children;
+        if (gltfNode.Children != null && gltfNode.Children.Length > 0)
+        {
+            children = new ModelNode[gltfNode.Children.Length];
+            for (int i = 0; i < gltfNode.Children.Length; i++)
+            {
+                children[i] = BuildNode(doc, gltfNode.Children[i], meshGroupCount);
+            }
+        }
+        else
+        {
+            children = [];
+        }
+
+        return new ModelNode(localTransform, meshGroupIdx, children);
     }
 
     private static Dictionary<int, nuint> LoadTextures(GltfDocument doc, byte[] binChunk)
