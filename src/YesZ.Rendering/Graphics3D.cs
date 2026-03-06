@@ -204,6 +204,8 @@ public static class Graphics3D
     /// </summary>
     public static void DrawModel(Model3D model, Matrix4x4 worldMatrix)
     {
+        var savedMaterial = _currentMaterial;
+
         foreach (var entry in model.Meshes)
         {
             int matIdx = entry.MaterialIndex;
@@ -214,6 +216,8 @@ public static class Graphics3D
 
             DrawMesh(entry.Mesh, worldMatrix);
         }
+
+        _currentMaterial = savedMaterial;
     }
 
     /// <summary>

@@ -50,14 +50,18 @@ public static class GltfLoader
                 var prim = gltfMesh.Primitives[0];
                 var extracted = MeshExtractor.ExtractPrimitive(prim, reader);
                 var mesh = Mesh3D.Create(extracted.Vertices, extracted.Indices);
-                int materialIdx = prim.Material ?? 0;
-                if (materialIdx >= materials.Length)
-                    materialIdx = 0;
+                int materialIdx = prim.Material ?? (materials.Length - 1);
+                if (materialIdx < 0 || materialIdx >= materials.Length)
+                    materialIdx = materials.Length - 1;
                 meshEntries.Add(new ModelMesh(mesh, materialIdx));
             }
         }
 
-        return new Model3D(meshEntries.ToArray(), materials);
+        // Collect owned texture handles for disposal
+        var ownedTextures = new nuint[textures.Count];
+        textures.Values.CopyTo(ownedTextures, 0);
+
+        return new Model3D(meshEntries.ToArray(), materials, ownedTextures);
     }
 
     /// <summary>
@@ -98,7 +102,11 @@ public static class GltfLoader
             if (doc.BufferViews == null)
                 continue;
 
-            var view = doc.BufferViews[image.BufferView.Value];
+            int bvIndex = image.BufferView.Value;
+            if (bvIndex < 0 || bvIndex >= doc.BufferViews.Length)
+                continue;
+
+            var view = doc.BufferViews[bvIndex];
             int offset = view.ByteOffset ?? 0;
             int length = view.ByteLength;
 
@@ -129,7 +137,8 @@ public static class GltfLoader
             return [Graphics3D.CreateLitMaterial()];
         }
 
-        var materials = new Material3D[doc.Materials.Length];
+        // Index 0..N-1 = authored materials, index N = default for unassigned primitives
+        var materials = new Material3D[doc.Materials.Length + 1];
         for (int i = 0; i < doc.Materials.Length; i++)
         {
             var gltfMat = doc.Materials[i];
@@ -170,6 +179,9 @@ public static class GltfLoader
 
             materials[i] = mat;
         }
+
+        // Default material at the end for primitives with no material assignment
+        materials[doc.Materials.Length] = Graphics3D.CreateLitMaterial();
 
         return materials;
     }

@@ -3,8 +3,10 @@
 //  Renderable model loaded from glTF: holds GPU-uploaded meshes and
 //  materials with per-mesh material assignment. Created by GltfLoader.
 //
-//  Depends on: YesZ (Mesh3D), YesZ.Rendering (Material3D)
+//  Depends on: YesZ (Mesh3D), YesZ.Rendering (Material3D), NoZ (Graphics)
 //  Used by:    Graphics3D.DrawModel, game code
+
+using NoZ;
 
 namespace YesZ.Rendering;
 
@@ -14,19 +16,21 @@ namespace YesZ.Rendering;
 public readonly record struct ModelMesh(Mesh3D Mesh, int MaterialIndex);
 
 /// <summary>
-/// Renderable 3D model container. Owns GPU meshes and materials loaded from glTF.
+/// Renderable 3D model container. Owns GPU meshes, materials, and texture handles loaded from glTF.
 /// </summary>
 public class Model3D : IDisposable
 {
     public ModelMesh[] Meshes { get; }
     public Material3D[] Materials { get; }
 
+    private readonly nuint[] _ownedTextureHandles;
     private bool _disposed;
 
-    public Model3D(ModelMesh[] meshes, Material3D[] materials)
+    public Model3D(ModelMesh[] meshes, Material3D[] materials, nuint[] ownedTextureHandles)
     {
         Meshes = meshes;
         Materials = materials;
+        _ownedTextureHandles = ownedTextureHandles;
     }
 
     public void Dispose()
@@ -36,6 +40,9 @@ public class Model3D : IDisposable
 
         foreach (var entry in Meshes)
             entry.Mesh.Dispose();
+
+        foreach (var handle in _ownedTextureHandles)
+            Graphics.Driver.DestroyTexture(handle);
 
         GC.SuppressFinalize(this);
     }
