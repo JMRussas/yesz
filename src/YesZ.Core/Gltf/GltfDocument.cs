@@ -1,9 +1,8 @@
 //  YesZ - glTF JSON Document Model
 //
 //  POCOs for System.Text.Json deserialization of the glTF 2.0 JSON chunk.
-//  Only models the fields needed for Phase 4a (mesh extraction) and 4b
-//  (model rendering). Additional fields (skins, animations) will be added
-//  in Phase 5a.
+//  Models fields needed for mesh extraction (4a), model rendering (4b),
+//  node hierarchy (4c), and skeleton/animation data (5a).
 //
 //  Uses camelCase naming policy for glTF spec compliance.
 //
@@ -53,6 +52,12 @@ public class GltfDocument
     [JsonPropertyName("samplers")]
     public GltfSampler[]? Samplers { get; set; }
 
+    [JsonPropertyName("skins")]
+    public GltfSkin[]? Skins { get; set; }
+
+    [JsonPropertyName("animations")]
+    public GltfAnimation[]? Animations { get; set; }
+
     /// <summary>
     /// Deserialize a glTF JSON string into a document.
     /// </summary>
@@ -100,6 +105,9 @@ public class GltfNode
 
     [JsonPropertyName("scale")]
     public float[]? Scale { get; set; }
+
+    [JsonPropertyName("skin")]
+    public int? Skin { get; set; }
 }
 
 public class GltfMesh
@@ -241,4 +249,61 @@ public class GltfSampler
 
     [JsonPropertyName("wrapT")]
     public int? WrapT { get; set; }
+}
+
+public class GltfSkin
+{
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    [JsonPropertyName("joints")]
+    public int[] Joints { get; set; } = [];
+
+    [JsonPropertyName("inverseBindMatrices")]
+    public int? InverseBindMatrices { get; set; }
+
+    [JsonPropertyName("skeleton")]
+    public int? Skeleton { get; set; }
+}
+
+public class GltfAnimation
+{
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    [JsonPropertyName("channels")]
+    public GltfAnimationChannel[] Channels { get; set; } = [];
+
+    [JsonPropertyName("samplers")]
+    public GltfAnimationSampler[] Samplers { get; set; } = [];
+}
+
+public class GltfAnimationChannel
+{
+    [JsonPropertyName("sampler")]
+    public int Sampler { get; set; }
+
+    [JsonPropertyName("target")]
+    public GltfAnimationTarget Target { get; set; } = new();
+}
+
+public class GltfAnimationTarget
+{
+    [JsonPropertyName("node")]
+    public int? Node { get; set; }
+
+    [JsonPropertyName("path")]
+    public string Path { get; set; } = "";
+}
+
+public class GltfAnimationSampler
+{
+    [JsonPropertyName("input")]
+    public int Input { get; set; }
+
+    [JsonPropertyName("output")]
+    public int Output { get; set; }
+
+    [JsonPropertyName("interpolation")]
+    public string? Interpolation { get; set; }
 }

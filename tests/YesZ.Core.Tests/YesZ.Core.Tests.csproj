@@ -25,6 +25,7 @@
   <ItemGroup>
     <EmbeddedResource Include="TestData\Box.glb" />
     <EmbeddedResource Include="TestData\BoxTextured.glb" />
+    <EmbeddedResource Include="TestData\RiggedSimple.glb" />
   </ItemGroup>
 
 </Project>
