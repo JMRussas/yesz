@@ -199,6 +199,24 @@ public static class Graphics3D
     }
 
     /// <summary>
+    /// Draw all meshes in a model with the given root world transform.
+    /// Sets each mesh's material before drawing.
+    /// </summary>
+    public static void DrawModel(Model3D model, Matrix4x4 worldMatrix)
+    {
+        foreach (var entry in model.Meshes)
+        {
+            int matIdx = entry.MaterialIndex;
+            if (matIdx >= 0 && matIdx < model.Materials.Length)
+                SetMaterial(model.Materials[matIdx]);
+            else if (model.Materials.Length > 0)
+                SetMaterial(model.Materials[0]);
+
+            DrawMesh(entry.Mesh, worldMatrix);
+        }
+    }
+
+    /// <summary>
     /// End 3D rendering pass. Restores the 2D orthographic projection
     /// for NoZ UI overlay rendering.
     /// </summary>

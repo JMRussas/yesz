@@ -1118,7 +1118,9 @@ let final_color = base_color.rgb * total_diffuse + total_specular * mix(0.04, 1.
 
 ---
 
-## Phase 4a: glTF Parser + Mesh Extraction
+## Phase 4a: glTF Parser + Mesh Extraction ✅
+
+**Status:** Complete
 
 **Milestone:** Unit tests parse a known `.glb` test file (e.g., "Box.glb"), produce correct vertex/index counts and data ranges.
 
@@ -1340,7 +1342,9 @@ This phase is 100% unit-testable — no GPU dependency. Can be developed test-fi
 
 ---
 
-## Phase 4b: Model Rendering
+## Phase 4b: Model Rendering ✅
+
+**Status:** Complete
 
 **Milestone:** HelloCube loads and displays a textured glTF model (e.g., "BoxTextured.glb").
 

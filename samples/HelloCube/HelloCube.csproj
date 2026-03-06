@@ -20,4 +20,8 @@
     <ProjectReference Include="..\..\engine\noz\generators\NoZ.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\BoxTextured.glb" />
+  </ItemGroup>
+
 </Project>

@@ -1,14 +1,15 @@
 //  YesZ - HelloCube Application
 //
-//  Renders a spinning lit cube with directional, ambient, and point lighting.
-//  Demonstrates Graphics3D multi-light system with Blinn-Phong shading.
+//  Renders a spinning glTF model (BoxTextured) with directional, ambient,
+//  and point lighting. Demonstrates glTF loading and multi-light rendering.
 //
-//  Depends on: YesZ.Core (Camera3D, Transform3D, Mesh3D, Mesh3DBuilder, DirectionalLight, AmbientLight, PointLight),
-//              YesZ.Rendering (Graphics3D, Material3D, TextureLoader), NoZ (IApplication, Graphics, UI, Color, Time)
+//  Depends on: YesZ.Core (Camera3D, Transform3D, DirectionalLight, AmbientLight, PointLight),
+//              YesZ.Rendering (Graphics3D, GltfLoader, Model3D), NoZ (IApplication, Graphics, UI, Color, Time)
 //  Used by:    Program.cs
 
 using System;
 using System.Numerics;
+using System.Reflection;
 using NoZ;
 using YesZ;
 using YesZ.Rendering;
@@ -18,9 +19,8 @@ namespace YesZ.Samples.HelloCube;
 public class HelloCubeApp : IApplication
 {
     private Camera3D? _camera;
-    private Mesh3D? _cube;
-    private Material3D? _material;
-    private Transform3D _cubeTransform;
+    private Model3D? _model;
+    private Transform3D _modelTransform;
     private float _rotationAngle;
 
     private static readonly ContainerStyle RootStyle = new()
@@ -55,10 +55,6 @@ public class HelloCubeApp : IApplication
 
     public void LoadAssets()
     {
-        // Create cube mesh
-        var (vertices, indices) = Mesh3DBuilder.CreateCube();
-        _cube = Mesh3D.Create(vertices, indices);
-
         // Set up camera
         _camera = new Camera3D
         {
@@ -66,27 +62,20 @@ public class HelloCubeApp : IApplication
             FieldOfView = 50f,
         };
 
-        // Initialize cube transform
-        _cubeTransform = Transform3D.Identity;
+        _modelTransform = Transform3D.Identity;
 
         // Initialize 3D rendering system
         Graphics3D.Initialize();
 
-        // Create checkerboard texture and material
-        var texture = TextureLoader.CreateCheckerboard(
-            256,
-            new Color(0.9f, 0.85f, 0.7f),
-            new Color(0.4f, 0.35f, 0.25f),
-            cellSize: 32);
-
-        _material = Graphics3D.CreateLitMaterial();
-        _material.BaseColorTexture = texture;
-        _material.Roughness = 0.6f;
+        // Load glTF model from embedded resource
+        _model = GltfLoader.LoadFromEmbeddedResource(
+            Assembly.GetExecutingAssembly(),
+            "YesZ.Samples.HelloCube.Assets.BoxTextured.glb");
     }
 
     public void Update()
     {
-        if (_camera == null || _cube == null) return;
+        if (_camera == null || _model == null) return;
 
         Graphics.ClearColor = Color.FromRgb(0x0F172A);
 
@@ -95,9 +84,9 @@ public class HelloCubeApp : IApplication
         if (size.X > 0 && size.Y > 0)
             _camera.AspectRatio = (float)size.X / size.Y;
 
-        // Spin the cube
+        // Spin the model
         _rotationAngle += Time.DeltaTime * 1.2f;
-        _cubeTransform.Rotation = Quaternion.CreateFromYawPitchRoll(_rotationAngle, _rotationAngle * 0.7f, 0);
+        _modelTransform.Rotation = Quaternion.CreateFromYawPitchRoll(_rotationAngle, _rotationAngle * 0.7f, 0);
 
         // 3D rendering pass
         Graphics3D.Begin(_camera);
@@ -115,7 +104,7 @@ public class HelloCubeApp : IApplication
             Intensity = 0.15f,
         });
 
-        // Point light — orbits the cube to show position-based attenuation
+        // Point light — orbits the model to show position-based attenuation
         float orbitAngle = _rotationAngle * 0.8f;
         Graphics3D.AddPointLight(new PointLight
         {
@@ -125,8 +114,7 @@ public class HelloCubeApp : IApplication
             Range = 8f,
         });
 
-        Graphics3D.SetMaterial(_material);
-        Graphics3D.DrawMesh(_cube, _cubeTransform.LocalMatrix);
+        Graphics3D.DrawModel(_model, _modelTransform.LocalMatrix);
         Graphics3D.End();
     }
 
@@ -137,7 +125,7 @@ public class HelloCubeApp : IApplication
             using (UI.BeginColumn(BoxStyle))
             {
                 UI.Label("YesZ", TitleStyle);
-                UI.Label("Phase 3c - Multi-Light", SubtitleStyle);
+                UI.Label("Phase 4b - Model Loading", SubtitleStyle);
             }
         }
     }
