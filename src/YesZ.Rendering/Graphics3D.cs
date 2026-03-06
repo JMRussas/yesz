@@ -164,6 +164,9 @@ public static class Graphics3D
         _initialized = true;
     }
 
+    /// <summary>
+    /// Create a new Material3D using the textured (unlit) shader and default white texture.
+    /// </summary>
     public static Material3D CreateMaterial()
     {
         if (!_initialized)
@@ -172,6 +175,10 @@ public static class Graphics3D
         return new Material3D(_texturedShader!.Handle, _defaultWhiteTexture);
     }
 
+    /// <summary>
+    /// Create a new Material3D using the lit shader and default white texture.
+    /// Lit materials receive directional + ambient lighting via the light UBO.
+    /// </summary>
     public static Material3D CreateLitMaterial()
     {
         if (!_initialized)
@@ -180,28 +187,50 @@ public static class Graphics3D
         return new Material3D(_litShader!.Handle, _defaultWhiteTexture);
     }
 
+    /// <summary>
+    /// Set the active material for subsequent DrawMesh calls.
+    /// Pass null to revert to the unlit (vertex-color-only) shader.
+    /// </summary>
     public static void SetMaterial(Material3D? material)
     {
         _currentMaterial = material;
     }
 
+    /// <summary>
+    /// Set the directional light for the current frame.
+    /// </summary>
     public static void SetDirectionalLight(in DirectionalLight light)
     {
         _lights.Directional = light;
     }
 
+    /// <summary>
+    /// Set the ambient light for the current frame.
+    /// </summary>
     public static void SetAmbientLight(in AmbientLight light)
     {
         _lights.Ambient = light;
     }
 
+    /// <summary>
+    /// Add a point light for the current frame.
+    /// Up to <see cref="LightEnvironment.MaxPointLights"/> can be added per frame.
+    /// </summary>
     public static void AddPointLight(in PointLight light)
     {
         _lights.AddPointLight(in light);
     }
 
+    /// <summary>
+    /// Read-only access to the current light environment (for testing and diagnostics).
+    /// </summary>
     public static LightEnvironment Lights => _lights;
 
+    /// <summary>
+    /// Begin 3D rendering pass. Saves the current 2D projection, stores
+    /// the camera for per-draw MVP computation, and clears per-frame state.
+    /// Light and shadow UBO uploads are deferred to the first lit draw call.
+    /// </summary>
     public static void Begin(Camera3D camera)
     {
         if (!_initialized)
@@ -217,6 +246,11 @@ public static class Graphics3D
         _shadowPassEnabled = false;
     }
 
+    /// <summary>
+    /// Draw a 3D mesh with the given world transform.
+    /// For lit materials: uploads VP to globals, model + normal matrix to material UBO.
+    /// For unlit/textured: uploads full MVP to globals, material params to material UBO.
+    /// </summary>
     public static void DrawMesh(Mesh3D mesh, Matrix4x4 worldMatrix)
     {
         if (_camera == null) return;
@@ -234,6 +268,10 @@ public static class Graphics3D
         }
     }
 
+    /// <summary>
+    /// Draw all meshes in a model with the given root world transform.
+    /// Recursively traverses the node hierarchy, composing transforms.
+    /// </summary>
     public static void DrawModel(Model3D model, Matrix4x4 worldMatrix)
     {
         var savedMaterial = _currentMaterial;
@@ -265,6 +303,11 @@ public static class Graphics3D
             DrawNode(child, world, model);
     }
 
+    /// <summary>
+    /// Draw a skinned mesh with the given joint matrices (from JointMatrixComputer).
+    /// Joint matrices replace the model matrix — the skin matrix handles world placement.
+    /// The current material is used for lighting and texturing.
+    /// </summary>
     public static void DrawSkinnedMesh(SkinnedMesh3D mesh, ReadOnlySpan<Matrix4x4> jointMatrices)
     {
         if (_camera == null || _skinnedLitShader == null) return;
@@ -306,6 +349,10 @@ public static class Graphics3D
         Graphics.DrawElements(mesh.IndexCount, 0);
     }
 
+    /// <summary>
+    /// Draw all meshes in a model with skeletal animation.
+    /// Non-skinned primitives are rendered with the given world transform.
+    /// </summary>
     public static void DrawAnimatedModel(
         Model3D model, Matrix4x4 worldMatrix, ReadOnlySpan<Matrix4x4> jointMatrices)
     {
@@ -373,6 +420,10 @@ public static class Graphics3D
         _shadowPassEnabled = true;
     }
 
+    /// <summary>
+    /// End 3D rendering pass. Executes the shadow depth pass (if enabled),
+    /// then restores the 2D orthographic projection for NoZ UI overlay rendering.
+    /// </summary>
     public static void End()
     {
         // Execute shadow depth pass via direct driver calls (bypasses NoZ batch system).
@@ -428,6 +479,11 @@ public static class Graphics3D
         driver.EndDepthOnlyPass();
     }
 
+    /// <summary>
+    /// Compute the normal matrix for a given model matrix.
+    /// Returns the transpose of the inverse of the upper 3×3, stored as a full mat4x4
+    /// for GPU alignment. Falls back to the model matrix if inversion fails.
+    /// </summary>
     internal static Matrix4x4 ComputeNormalMatrix(in Matrix4x4 model)
     {
         if (Matrix4x4.Invert(model, out var inverted))
@@ -435,6 +491,7 @@ public static class Graphics3D
             return Matrix4x4.Transpose(inverted);
         }
 
+        // Singular matrix fallback: use model as-is (correct for rotation + uniform scale)
         return model;
     }
 
