@@ -3,12 +3,12 @@
 // Extends lit3d.wgsl with cascaded directional light shadow sampling.
 // Transforms vertices by Model (material UBO) and VP (globals).
 // Evaluates directional light + up to 8 point lights with smooth attenuation.
-// Selects shadow cascade based on distance from camera, applies PCF 3×3 per cascade.
+// Selects shadow cascade based on distance from camera, applies PCF 3×3 via texture array.
 //
 // Flags: ShaderFlags.Depth | ShaderFlags.DepthLess
 
-// Layout must match NoZ's Globals buffer (see Graphics.UploadGlobals).
-// In lit mode, globals.projection holds VP (view × projection), not MVP.
+// Layout must match Globals3D struct in Graphics3D.cs.
+// In lit mode, viewproj holds VP (view × projection), not MVP.
 struct Globals {
     projection: mat4x4f,
     time: f32,             // Unused here — required for layout compatibility with NoZ
@@ -54,11 +54,8 @@ struct CascadeShadowData {
 }
 @group(0) @binding(5) var<uniform> shadow: CascadeShadowData;
 
-// One depth texture per cascade (max 4)
-@group(0) @binding(6) var shadow_map_0: texture_depth_2d;
-@group(0) @binding(7) var shadow_map_1: texture_depth_2d;
-@group(0) @binding(8) var shadow_map_2: texture_depth_2d;
-@group(0) @binding(9) var shadow_map_3: texture_depth_2d;
+// Single depth texture array — one layer per cascade (max 4)
+@group(0) @binding(6) var shadow_maps: texture_depth_2d_array;
 
 struct VertexInput {
     @location(0) position: vec3f,
@@ -92,25 +89,8 @@ fn get_cascade_index(dist: f32) -> u32 {
     return shadow.cascade_count - 1u;
 }
 
-// PCF 3×3 on a specific cascade's depth texture.
-fn pcf_sample_0(shadow_uv: vec2f, compare_depth: f32) -> f32 {
-    let dim = textureDimensions(shadow_map_0);
-    return pcf_kernel(shadow_map_0, dim, shadow_uv, compare_depth);
-}
-fn pcf_sample_1(shadow_uv: vec2f, compare_depth: f32) -> f32 {
-    let dim = textureDimensions(shadow_map_1);
-    return pcf_kernel(shadow_map_1, dim, shadow_uv, compare_depth);
-}
-fn pcf_sample_2(shadow_uv: vec2f, compare_depth: f32) -> f32 {
-    let dim = textureDimensions(shadow_map_2);
-    return pcf_kernel(shadow_map_2, dim, shadow_uv, compare_depth);
-}
-fn pcf_sample_3(shadow_uv: vec2f, compare_depth: f32) -> f32 {
-    let dim = textureDimensions(shadow_map_3);
-    return pcf_kernel(shadow_map_3, dim, shadow_uv, compare_depth);
-}
-
-fn pcf_kernel(shadow_map: texture_depth_2d, dim: vec2u, shadow_uv: vec2f, compare_depth: f32) -> f32 {
+// PCF 3×3 on a specific cascade layer of the depth texture array.
+fn pcf_kernel(dim: vec2u, layer: u32, shadow_uv: vec2f, compare_depth: f32) -> f32 {
     let texel = vec2i(shadow_uv * vec2f(dim));
     var shadow_sum = 0.0;
     for (var y = -1; y <= 1; y++) {
@@ -118,7 +98,7 @@ fn pcf_kernel(shadow_map: texture_depth_2d, dim: vec2u, shadow_uv: vec2f, compar
             let sample_texel = texel + vec2i(x, y);
             if (sample_texel.x >= 0 && sample_texel.x < i32(dim.x) &&
                 sample_texel.y >= 0 && sample_texel.y < i32(dim.y)) {
-                let shadow_depth = textureLoad(shadow_map, sample_texel, 0);
+                let shadow_depth = textureLoad(shadow_maps, sample_texel, layer, 0);
                 shadow_sum += select(0.0, 1.0, compare_depth <= shadow_depth);
             } else {
                 shadow_sum += 1.0;
@@ -152,14 +132,9 @@ fn compute_cascaded_shadow(world_pos: vec3f, world_normal: vec3f, NdotL: f32) ->
     let bias = max(shadow.shadow_bias * (1.0 - NdotL), shadow.shadow_bias * 0.1);
     let compare_depth = light_ndc.z - bias;
 
-    // Sample from the correct cascade's depth texture
-    switch cascade {
-        case 0u: { return pcf_sample_0(shadow_uv, compare_depth); }
-        case 1u: { return pcf_sample_1(shadow_uv, compare_depth); }
-        case 2u: { return pcf_sample_2(shadow_uv, compare_depth); }
-        case 3u: { return pcf_sample_3(shadow_uv, compare_depth); }
-        default: { return 1.0; }
-    }
+    // Sample from the correct cascade layer
+    let dim = textureDimensions(shadow_maps);
+    return pcf_kernel(dim, cascade, shadow_uv, compare_depth);
 }
 
 @vertex fn vs_main(in: VertexInput) -> VertexOutput {
