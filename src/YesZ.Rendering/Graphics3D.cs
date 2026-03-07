@@ -488,12 +488,21 @@ public static class Graphics3D
 
         // Execute each draw command
         int skinnedIndex = 0;
+        bool viewprojIsVP = true; // tracks whether viewproj holds VP or was overwritten by unlit MVP
         foreach (var cmd in _sceneDrawCommands)
         {
             driver.BindShader(cmd.ShaderHandle);
 
             if (cmd.IsLit)
             {
+                // Lit path needs VP in viewproj — re-upload if unlit draw overwrote it
+                if (!viewprojIsVP)
+                {
+                    driver.SetUniform("viewproj", MemoryMarshal.AsBytes(
+                        new ReadOnlySpan<Globals3D>(in globals)));
+                    viewprojIsVP = true;
+                }
+
                 driver.SetUniform("material", MemoryMarshal.AsBytes(
                     new ReadOnlySpan<LitMaterialUniforms>(in cmd.LitMaterial)));
 
@@ -507,12 +516,12 @@ public static class Graphics3D
             }
             else
             {
-                // Unlit/textured — MVP already baked into globals for unlit,
-                // but we need to update globals per-draw for unlit path
+                // Unlit/textured — per-draw MVP in viewproj
                 var mvp = cmd.WorldMatrix * _viewProjection;
                 var unlitGlobals = new Globals3D { Projection = mvp };
                 driver.SetUniform("viewproj", MemoryMarshal.AsBytes(
                     new ReadOnlySpan<Globals3D>(in unlitGlobals)));
+                viewprojIsVP = false;
 
                 if (cmd.ShaderHandle == _texturedShader)
                 {
