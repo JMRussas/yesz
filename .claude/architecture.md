@@ -1,87 +1,43 @@
-# YesZ Architecture
+# YesZ architecture
 
-## Layer Diagram
+YesZ adds a 3D layer alongside NoZ's 2D rendering and UI. The pinned NoZ fork supplies the shared graphics context and platform implementation, including additive 3D driver operations.
 
-```
-┌─────────────────────────────────────────────────┐
-│                    Game Code                     │
-│         (uses YesZ.Core + NoZ for 2D UI)        │
-├────────────────────┬────────────────────────────┤
-│   NoZ 2D Layer     │      YesZ 3D Layer         │
-│  (immediate-mode   │  (scene graph, materials,   │
-│   UI, sprites,     │   lighting, model loading,  │
-│   text, particles) │   3D camera, transforms)    │
-├────────────────────┴────────────────────────────┤
-│              NoZ Engine Core (forked)            │
-│  IGraphicsDriver + IVertex + Shader + Asset     │
-│  + depth buffer + cull mode (additive changes)  │
-├─────────────────────────────────────────────────┤
-│           WebGPU Backend (NoZ fork)             │
-│  + depth texture + 3D pipeline states           │
-└─────────────────────────────────────────────────┘
+## Layers
+
+```text
+Game / HelloCube sample
+  ├── NoZ: 2D UI and sprites
+  └── YesZ: camera, meshes, materials, lights, animation
+        └── Graphics3D: command collection and 3D passes
+              └── IGraphicsDriver + IGraphicsDriver3D
+                    └── NoZ fork: WebGPU backend and SDL platform
 ```
 
-## Roadmap
+## Current render flow
 
-See [roadmap.md](roadmap.md) for the full phase plan, milestones, and open design decisions.
+`Graphics3D` owns its draw-command lists. It does not submit 3D draws through NoZ's 2D batch queue.
 
-## Design Principles
+1. `Begin(camera)` records the camera and clears the frame's command state.
+2. `DrawMesh` collects scene draw commands and eligible shadow casters.
+3. `End()` performs enabled shadow-depth passes into the cascade depth texture array, then the 3D scene pass.
+4. Draws upload the uniforms required by their material path: unlit uses a per-object MVP; lit uses camera VP plus per-object model and normal matrices.
+5. The prepass flag lets NoZ's subsequent 2D pass preserve the 3D color output with `LoadOp.Load` and overlay its UI.
 
-1. **YesZ is parallel to NoZ's 2D, not a replacement.** Both systems share the same IGraphicsDriver and WebGPU context.
-2. **Changes to NoZ fork are additive only.** New methods, new enums — never modify existing behavior.
-3. **Graphics3D.Begin()/End() brackets 3D rendering.** Enables depth testing, sets perspective projection. End() restores 2D state.
-4. **Game loop pattern:** 3D scene first, then NoZ 2D UI overlay.
+See [Graphics3D.cs](../src/YesZ.Rendering/Graphics3D.cs) for ordering and state transitions. The previous batch-based design was replaced in [PR #17](https://github.com/JMRussas/yesz/pull/17).
 
-## Project Dependencies
+## Integration boundary
 
-| Project | Depends On | Role |
-|---------|-----------|------|
-| YesZ.Core | NoZ.Engine | 3D math, Camera3D, Transform3D, Mesh3D |
-| YesZ.Rendering | YesZ.Core, NoZ.Engine | Graphics3D, materials, lighting, shaders |
-| YesZ.Desktop | YesZ.Core, YesZ.Rendering, NoZ.Desktop, NoZ.WebGPU | Desktop app launcher |
-| HelloCube | All of the above | Sample application |
-| YesZ.Core.Tests | YesZ.Core | Unit tests for math/transforms |
-| YesZ.Rendering.Tests | YesZ.Rendering | Unit tests for rendering logic |
+`IGraphicsDriver3D` separates operations needed for 3D scene passes and depth texture arrays. This remains a fork integration, not a claim of compatibility with an unmodified upstream engine. Use the repository's pinned submodule revision.
 
-## NoZ Engine Key Types (Reference)
+## Projects and verification
 
-| Type | Location | Purpose |
-|------|----------|---------|
-| `IApplication` | engine/src/ApplicationConfig.cs | Game interface: Update(), UpdateUI(), LoadAssets() |
-| `Application` | engine/src/Application.cs | Init/Run/Shutdown lifecycle |
-| `Graphics` | engine/src/graphics/Graphics.cs | 2D draw calls, state stack, batching |
-| `IGraphicsDriver` | engine/src/platform/IGraphicsDriver.cs | GPU abstraction (our extension point) |
-| `IVertex` | engine/src/graphics/MeshVertex.cs | Vertex format descriptor interface |
-| `Camera` | engine/src/graphics/Camera.cs | 2D camera (Matrix3x2) |
-| `SDLPlatform` | platform/desktop/ | SDL3 windowing |
-| `WebGPUGraphicsDriver` | platform/webgpu/ | WebGPU rendering |
+| Project | Responsibility |
+|---|---|
+| YesZ.Core | 3D math, transforms, camera, mesh data, glTF and animation |
+| YesZ.Rendering | Materials, lights, shadow configuration, shaders, pass execution |
+| YesZ.Desktop | Desktop launcher using NoZ's platform and graphics backend |
+| HelloCube | Interactive sample |
+| YesZ.Core.Tests | Math, glTF, animation, lighting-data tests |
+| YesZ.Rendering.Tests | Uniform layouts and rendering contracts |
 
-## Render Flow (Current — Phase 1b)
-
-```
-Frame Start
-├── Graphics3D.Begin(camera3D)
-│   ├── Save current 2D pass projection
-│   └── Store camera reference for MVP computation
-├── Graphics3D.DrawMesh(mesh, worldMatrix)    ← per object
-│   ├── Compute MVP = worldMatrix × camera.ViewProjectionMatrix
-│   ├── SetPassProjection(MVP) → creates globals snapshot
-│   ├── SetShader(unlit3d) + SetMesh(mesh)
-│   └── DrawElements() → records batch command
-├── Graphics3D.End()
-│   └── Restore 2D pass projection
-├── [Game draws 2D UI via NoZ Graphics/UI]
-└── Frame End
-    ├── Sort + batch all draw commands
-    ├── 3D draws: depth test (Less), depth write → back faces hidden
-    └── 2D draws: depth test (Always), no depth write → renders on top
-```
-
-### Key Design: MVP in Globals
-
-3D uses MVP (model × view × projection) stored in the globals system as the "projection"
-matrix. Each DrawMesh creates a unique globals snapshot, producing a unique batch state.
-This integrates with NoZ's batch system without per-draw uniform buffer tracking.
-
-Limitation: max 64 unique transforms per frame (globals buffer limit). Phase 2+ will
-revisit when lighting needs separate world-space positions.
+Automated checks establish these contracts, not cross-driver visual correctness or throughput. See the [case study](../docs/case-study.md) and [roadmap](roadmap.md).
